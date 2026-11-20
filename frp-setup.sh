@@ -1384,7 +1384,8 @@ advanced_config() {
 
             print_info "Available server configurations:"
             echo
-            configs=($(ls /root/frp/server/*.toml 2>/dev/null | xargs -n1 basename))
+            local configs=()
+            mapfile -t configs < <(find /root/frp/server -maxdepth 1 -type f -name '*.toml' -printf '%f\n' 2>/dev/null | sort)
             for i in "${!configs[@]}"; do
                 echo "$((i+1))) ${configs[$i]}"
             done
@@ -1427,7 +1428,8 @@ advanced_config() {
 
             print_info "Available client configurations:"
             echo
-            configs=($(ls /root/frp/client/*.toml 2>/dev/null | xargs -n1 basename))
+            local configs=()
+            mapfile -t configs < <(find /root/frp/client -maxdepth 1 -type f -name '*.toml' -printf '%f\n' 2>/dev/null | sort)
             for i in "${!configs[@]}"; do
                 echo "$((i+1))) ${configs[$i]}"
             done
@@ -2149,7 +2151,8 @@ backup_import() { # $1 = backup file path (required)
     if [[ -d "$stage/etc/systemd/system" ]]; then
         local f
         find "$stage/etc/systemd/system" -maxdepth 1 -type f | while read -r f; do
-            local base="/etc/systemd/system/$(basename "$f")"
+            local base
+            base="/etc/systemd/system/$(basename "$f")"
             if [[ -f "$base" ]]; then
                 cp -a "$base" "$base.bak-$bak_ts"
             fi
@@ -2532,7 +2535,7 @@ panel_cli() {
     shift || true
     case "$action" in
         install)
-            local file="" port="" pflag=""
+            local file="" port=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --file) file="$2"; shift 2 ;;

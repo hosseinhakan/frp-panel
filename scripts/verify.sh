@@ -19,7 +19,7 @@ step "vendored JS pin verification"
 
 step "go vet + go test"
 export PATH="/c/Program Files/Go/bin:$PATH"
-cd panel
+cd panel || exit 1
 go vet ./... || fail=1
 go test -count=1 ./... || fail=1
 cd ..

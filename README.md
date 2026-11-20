@@ -25,7 +25,9 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.0.0 --base URL`.
+Flags: `--port 9000 --bind ADDR --version v1.2.1 --base URL`. The panel binds
+`0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
+when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
 First start prints a **one-time admin password** to the console:
 
@@ -33,8 +35,8 @@ First start prints a **one-time admin password** to the console:
 journalctl -u frp-panel --no-pager | grep -i password | head -n1
 ```
 
-Open `http://127.0.0.1:9000` (or `http://<tunnel-ip>:9000`), sign in, set a
-real password, and you are on the dashboard.
+Open `http://<public-ip>:9000` (or `http://<tunnel-ip>:9000` when bound to a GRE
+address), sign in, set a real password, and you are on the dashboard.
 
 The bash CLI installs alongside from the same repo:
 

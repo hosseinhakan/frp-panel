@@ -250,9 +250,11 @@ emission := for each port p in expansion(p, udp_toggle, name_prefix):
 - Runs as **root** (same trust model as the CLI: it must write `/root/frp`, call systemctl,
   ip, sysctl, journalctl). Hardened unit: `NoNewPrivileges`, `PrivateTmp`,
   `ProtectSystem=full` + `ReadWritePaths=/root/frp /etc/frp-panel`, `RestrictSUIDSGID`.
-- Binds `127.0.0.1:9000` **plus** any GRE private IP found on the host by default
-  (recommended Iran access path); `0.0.0.0` is opt-in. No TLS by default (private-net
-  access pattern); self-signed TLS toggle available (`panel.toml [server] tls_cert/key`).
+- Binds `0.0.0.0:9000` (all interfaces) by default so the panel is reachable at
+  `http://<public-ip>:9000`; `--bind 127.0.0.1` keeps it loopback-only and a GRE
+  private IP like `10.100.111.2` restricts it to the tunnel. The installers add
+  `ufw allow <port>/tcp` when `ufw` is present. No TLS by default; self-signed TLS
+  toggle available (`panel.toml [server] tls_cert/key`).
 - Everything is `exec` of the exact commands a human admin would run — no D-Bus, no
   libraries that fight systemd. Unit names are whitelisted (`^[a-zA-Z0-9_.@-]{1,64}$`,
   must resolve to an existing config file) before any `systemctl` call → **no shell
@@ -644,9 +646,11 @@ root-only script removed.
   `frp-panel_linux_<arch>.tar.gz` from GitHub Releases → install binary → write the
   systemd unit via **`frp-panel install-unit`** (the binary emits its own canonical
   embedded `frp-panel.service` — no second copy of the unit anywhere) →
-  `systemctl enable --now` → print access URLs (loopback + every interface) and the
-  one-time password hint. Flags: `--port 9000 --bind 127.0.0.1 --version latest
-  --base URL`; `FRP_PANEL_RELEASE_BASE` overrides the download base like the CLI.
+  `systemctl enable --now` → open the panel port in UFW when the bind is not
+  loopback → print access URLs and the one-time password hint. Flags:
+  `--port 9000 --bind 0.0.0.0 --version latest --base URL`; pass
+  `--bind 127.0.0.1` for loopback-only. `FRP_PANEL_RELEASE_BASE` overrides the
+  download base like the CLI.
 - **`scripts/build-release.sh`**: `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"`
   for linux/amd64 + arm64; run `go vet` + `go test` first; package binary +
   install.sh per arch with a `.tar.gz.sha256` sidecar per tarball.

@@ -7,8 +7,9 @@
 #
 # Flags:
 #   --port N        panel listen port            (default: panel.toml 9000)
-#   --bind ADDR     panel listen address         (default: 127.0.0.1; use a GRE
-#                   tunnel IP like 10.100.111.2 for private-network access)
+#   --bind ADDR     panel listen address         (default: 0.0.0.0, all interfaces;
+#                   pass 127.0.0.1 for loopback-only or a GRE tunnel IP like
+#                   10.100.111.2 for private-network access)
 #   --version V     release tag to install       (default: latest)
 #   --base URL      tarball base URL override    (FRP_PANEL_RELEASE_BASE works too)
 #   --file PATH     install frp-panel from a local .tar.gz instead of downloading
@@ -53,8 +54,9 @@ Typical use (root on a fresh Ubuntu/Debian VPS):
 
 Flags:
   --port N        panel listen port    (default: panel.toml 9000)
-  --bind ADDR     panel listen address (default 127.0.0.1; use a GRE tunnel
-                  IP like 10.100.111.2 for private-network access)
+  --bind ADDR     panel listen address (default 0.0.0.0, all interfaces; pass
+                  127.0.0.1 for loopback-only, or a GRE tunnel IP like
+                  10.100.111.2 for private-network access)
   --version V     release tag         (default: latest)
   --base URL      tarball base URL override (FRP_PANEL_RELEASE_BASE works too)
   --file PATH     install frp-panel from a local .tar.gz (no download)
@@ -303,6 +305,34 @@ assert_panel_active() {
     exit 1
 }
 
+read_panel_conf() { # read_panel_conf <key> <default>
+    local key="$1" def="$2" val=""
+    if [[ -r "${CONF_DIR}/panel.toml" ]]; then
+        val="$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*['\"]?([^'\"]*)['\"]?[[:space:]]*$/\1/p" \
+            "${CONF_DIR}/panel.toml" | head -n1)"
+    fi
+    echo "${val:-$def}"
+}
+
+panel_bind_is_loopback() {
+    case "$1" in
+        127.0.0.1|localhost|::1|"[::1]") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+open_panel_firewall() { # open_panel_firewall <bind> <port>
+    local bind="$1" port="$2"
+    panel_bind_is_loopback "$bind" && return 0
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw allow "${port}/tcp" >/dev/null 2>&1; then
+            say "opened UFW port ${port}/tcp for the panel (bind ${bind})"
+        else
+            say "note: ufw is installed but 'ufw allow ${port}/tcp' failed — open it manually if the panel is unreachable"
+        fi
+    fi
+}
+
 if ! wait_for_panel_conf; then
     echo -e "${c_bad}frp-panel:${c_off} ${CONF_DIR}/panel.toml was not created within 10s — last 20 journal lines:" >&2
     journalctl -u frp-panel --no-pager -n 20 1>&2 2>/dev/null || true
@@ -324,17 +354,12 @@ if [[ -n "$PORT" || -n "$BIND" ]]; then
     fi
 fi
 
+# Open the panel port when it is reachable beyond loopback. Runs after the
+# optional listen overrides so a loopback-only rerun never leaves a public rule.
+open_panel_firewall "$(read_panel_conf bind "0.0.0.0")" "$(read_panel_conf port "9000")"
+
 # --- access URLs --------------------------------------------------------------
 # Read what the panel actually listens on (flags are only fallbacks).
-read_panel_conf() { # read_panel_conf <key> <default>
-    local key="$1" def="$2" val=""
-    if [[ -r "${CONF_DIR}/panel.toml" ]]; then
-        val="$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*['\"]?([^'\"]*)['\"]?[[:space:]]*$/\1/p" \
-            "${CONF_DIR}/panel.toml" | head -n1)"
-    fi
-    echo "${val:-$def}"
-}
-
 public_ipv4_addrs() { # deduplicated, non-loopback, non-container IPv4 addresses
     ip -o -4 addr show 2>/dev/null \
         | awk '$2 != "lo" && $2 !~ /^(docker|br-|veth|virbr|podman|cni|flannel)/ {
@@ -355,7 +380,7 @@ detect_public_ip() {
     echo "${candidate:-<public-ip>}"
 }
 
-bind="$(read_panel_conf bind "127.0.0.1")"
+bind="$(read_panel_conf bind "0.0.0.0")"
 port="$(read_panel_conf port "9000")"
 [[ -n "$BIND" ]] && bind="$BIND"
 [[ -n "$PORT" ]] && port="$PORT"
@@ -368,6 +393,14 @@ echo "    journalctl -u frp-panel --no-pager | grep -i password | head -n1"
 echo
 say "access URLs:"
 case "$bind" in
+    ::1|"[::1]")
+        echo "    http://[::1]:${port}"
+        echo
+        say "the panel listens on IPv6 loopback only — tunnel it from your workstation:"
+        echo "    ssh -L ${port}:127.0.0.1:${port} root@$(detect_public_ip)"
+        echo
+        echo "    (or expose it directly: rerun with --bind 0.0.0.0)"
+        ;;
     127.0.0.1|localhost)
         echo "    http://127.0.0.1:${port}"
         echo

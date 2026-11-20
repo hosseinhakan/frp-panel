@@ -2718,6 +2718,31 @@ reverse_cli() {
 
 # --- Web Panel manager ------------------------------------------------------------
 
+panel_conf_value() { # panel_conf_value <key> <default>
+    local key="$1" def="$2" val=""
+    if [[ -r "$PANEL_CONF_DIR/panel.toml" ]]; then
+        val=$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*['\"]?([^'\"]*)['\"]?[[:space:]]*$/\1/p" \
+            "$PANEL_CONF_DIR/panel.toml" | head -n1)
+    fi
+    echo "${val:-$def}"
+}
+
+panel_open_firewall() {
+    local bind port
+    bind="$(panel_conf_value bind "0.0.0.0")"
+    port="$(panel_conf_value port "$PANEL_DEFAULT_PORT")"
+    case "$bind" in
+        127.0.0.1|localhost|::1|"[::1]") return 0 ;;
+    esac
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw allow "${port}/tcp" >/dev/null 2>&1; then
+            print_info "UFW: allowed ${port}/tcp for the panel (bind ${bind})."
+        else
+            print_warning "UFW rule for ${port}/tcp could not be added; open it manually if the panel is unreachable."
+        fi
+    fi
+}
+
 panel_menu() {
     while true; do
         clear
@@ -2793,6 +2818,7 @@ panel_install() { # $1 = optional local tarball path (empty = download release)
     ensure_panel_unit
     systemctl enable --now frp-panel
     sleep 1
+    panel_open_firewall
 
     print_success "Web Panel installed and started."
     panel_info
@@ -2807,21 +2833,28 @@ panel_info() {
     fi
     print_info "Panel service:"
     systemctl status frp-panel --no-pager -l 2>/dev/null | head -n 3 || true
-    local port="$PANEL_DEFAULT_PORT"
-    if [[ -r "$PANEL_CONF_DIR/panel.toml" ]]; then
-        local conf_port
-        conf_port=$(sed -n 's/^port *= *\([0-9]*\)$/\1/p' "$PANEL_CONF_DIR/panel.toml" | head -n1)
-        if [[ -n "$conf_port" ]]; then
-            port="$conf_port"
-        fi
-    fi
+    local port bind
+    port="$(panel_conf_value port "$PANEL_DEFAULT_PORT")"
+    bind="$(panel_conf_value bind "0.0.0.0")"
     echo
-    print_info "Access URLs (port $port):"
-    echo "  http://127.0.0.1:$port"
-    local ip
-    for ip in $(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1); do
-        echo "  http://$ip:$port"
-    done
+    print_info "Access URLs (bind $bind, port $port):"
+    case "$bind" in
+        127.0.0.1|localhost)
+            echo "  http://127.0.0.1:$port"
+            ;;
+        ::1|"[::1]")
+            echo "  http://[::1]:$port"
+            ;;
+        0.0.0.0|::)
+            local ip
+            for ip in $(ip -o -4 addr show 2>/dev/null | awk '$2 != "lo" {print $4}' | cut -d/ -f1); do
+                echo "  http://$ip:$port"
+            done
+            ;;
+        *)
+            echo "  http://$bind:$port"
+            ;;
+    esac
 }
 
 panel_change_port_prompt() {
@@ -2841,6 +2874,7 @@ panel_change_port_prompt() {
     fi
     sed -i "s/^port *=.*/port = $new_port/" "$PANEL_CONF_DIR/panel.toml"
     systemctl restart frp-panel
+    panel_open_firewall
     print_success "Panel port changed to $new_port and service restarted."
 }
 
@@ -3499,6 +3533,7 @@ panel_cli() {
                 if [[ -f "$PANEL_CONF_DIR/panel.toml" ]]; then
                     sed -i "s/^port *=.*/port = $port/" "$PANEL_CONF_DIR/panel.toml"
                     systemctl restart frp-panel
+                    panel_open_firewall
                     print_success "Panel port set to $port."
                 else
                     print_warning "panel.toml not generated yet — start the panel once, then re-run: frp-manager panel port $port"
@@ -3518,6 +3553,7 @@ panel_cli() {
             fi
             sed -i "s/^port *=.*/port = $1/" "$PANEL_CONF_DIR/panel.toml"
             systemctl restart frp-panel
+            panel_open_firewall
             print_success "Panel port set to $1."
             ;;
         uninstall)

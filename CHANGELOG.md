@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## v1.2.1 — public panel access by default
+
+- The panel bootstraps `bind = "0.0.0.0"` (all interfaces) instead of
+  `127.0.0.1`, so a fresh install is reachable at
+  `http://<public-ip>:9000`. `--bind 127.0.0.1` still gives loopback-only.
+- `scripts/install.sh` and `frp-manager panel install|port` run
+  `ufw allow <port>/tcp` (best-effort) when the bind is not loopback and
+  `ufw` is installed. The curl installer advertises the public URL.
+- Existing installs keep the bind already in their `panel.toml`; only fresh
+  bootstraps use `0.0.0.0`, and a missing/blank bind falls back to it.
+
+## v1.2.0 — Telegram alerts and multi-tunnel wizard
 
 ### Telegram alerts (`frp-watchdog`)
 

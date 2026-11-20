@@ -52,6 +52,35 @@ func TestBootstrapCreatesFileAndOneTimePassword(t *testing.T) {
 	}
 }
 
+func TestDefaultBindsAllInterfaces(t *testing.T) {
+	c := Default()
+	if c.Server.Bind != "0.0.0.0" {
+		t.Errorf("Default().Server.Bind = %q, want 0.0.0.0", c.Server.Bind)
+	}
+	if DefaultBind != "0.0.0.0" {
+		t.Errorf("DefaultBind = %q, want 0.0.0.0", DefaultBind)
+	}
+}
+
+func TestLoadDefaultsEmptyBindToAllInterfaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panel.toml")
+	c, _, err := Bootstrap(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Server.Bind = ""
+	if err := Save(path, c); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Server.Bind != "0.0.0.0" {
+		t.Errorf("empty bind loaded as %q, want 0.0.0.0", loaded.Server.Bind)
+	}
+}
+
 func TestLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "panel.toml")

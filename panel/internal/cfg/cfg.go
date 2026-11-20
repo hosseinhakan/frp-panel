@@ -20,7 +20,7 @@ import (
 
 // Defaults for panel runtime knobs.
 const (
-	DefaultBind       = "127.0.0.1"
+	DefaultBind       = "0.0.0.0"
 	DefaultPort       = 9000
 	DefaultCookieName = "frp_session"
 	DefaultTTLHours   = 12
@@ -31,7 +31,7 @@ const (
 // Config is the managed subset of panel.toml.
 type Config struct {
 	Server struct {
-		Bind string `toml:"bind"` // default 127.0.0.1; public bind is opt-in
+		Bind string `toml:"bind"` // default 0.0.0.0 (all interfaces); use 127.0.0.1 for loopback-only
 		Port int    `toml:"port"` // default 9000
 	} `toml:"server"`
 

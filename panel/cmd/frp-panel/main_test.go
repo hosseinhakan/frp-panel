@@ -6,7 +6,26 @@ import (
 	"testing"
 
 	"github.com/frp-suite/panel/internal/assets"
+	"github.com/frp-suite/panel/internal/cfg"
 )
+
+func TestListenAddrDefaultsToAllInterfaces(t *testing.T) {
+	empty := &cfg.Config{}
+	if got := listenAddr("", 0, empty); got != "0.0.0.0:9000" {
+		t.Errorf("listenAddr(empty) = %q, want 0.0.0.0:9000", got)
+	}
+	c := cfg.Default()
+	if got := listenAddr("", 0, c); got != "0.0.0.0:9000" {
+		t.Errorf("listenAddr(bootstrapped) = %q, want 0.0.0.0:9000", got)
+	}
+	c.Server.Bind = "127.0.0.1"
+	if got := listenAddr("", 0, c); got != "127.0.0.1:9000" {
+		t.Errorf("loopback bind = %q, want 127.0.0.1:9000", got)
+	}
+	if got := listenAddr("10.100.111.2", 9100, c); got != "10.100.111.2:9100" {
+		t.Errorf("flag override = %q, want 10.100.111.2:9100", got)
+	}
+}
 
 func TestWritePanelUnit(t *testing.T) {
 	dir := t.TempDir()

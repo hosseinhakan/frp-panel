@@ -47,7 +47,7 @@ Usage:
 
 serve:
   --config   panel config path            (default /etc/frp-panel/panel.toml)
-  --bind     listen address override       (default: panel.toml [server] bind)
+  --bind     listen address override       (default: panel.toml [server] bind, 0.0.0.0)
   --port     listen port override          (default: panel.toml [server] port)
   First run with no panel.toml bootstraps it and prints a ONE-TIME admin
   password to the console (change it after first login).
@@ -227,7 +227,7 @@ func listenAddr(bind string, port int, c *cfg.Config) string {
 		port = c.Server.Port
 	}
 	if bind == "" {
-		bind = "127.0.0.1"
+		bind = cfg.DefaultBind
 	}
 	if port <= 0 {
 		port = 9000

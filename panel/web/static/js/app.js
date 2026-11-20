@@ -146,6 +146,25 @@ window.FRP = {
     return ms >= 100 ? ms.toFixed(0) + " ms" : ms.toFixed(1) + " ms";
   },
 
+  // versionLabel normalizes "1.2.2", "v1.2.2", or "vv1.2.2" to "v1.2.2".
+  versionLabel(version) {
+    const v = String(version || "").trim().replace(/^v+/i, "");
+    return v ? "v" + v : "v—";
+  },
+
+  // unitLabel hides systemd's internal "unknown" in favour of the state a
+  // human expects: stopped / disabled.
+  unitLabel(state, kind) {
+    const s = String(state || "").trim().toLowerCase();
+    if (kind === "enabled") {
+      return !s || s === "unknown" || s === "not-found" ? "disabled" : s;
+    }
+    if (!s || s === "unknown" || s === "not-found" || s === "dead" || s === "inactive") {
+      return "stopped";
+    }
+    return s;
+  },
+
   // unitPill maps a systemctl state onto a pill class.
   unitPill(state) {
     switch ((state || "").trim()) {
@@ -765,12 +784,14 @@ document.addEventListener("alpine:init", () => {
         subnet: foreign ? "" : "10.100.111.0/30",
         controlPort: foreign ? "" : 7025,
         protocol: foreign ? "" : "tcp",
+        bindAddr: "", // empty = bind to the allocated GRE tunnel IP
         mirrorPayload: "",
-        localPorts: "8443,2053,443",
+        localPorts: "8989,8443,2053",
         proto: "both",
         localIp: "127.0.0.1",
         clientName: "",
         token: "",
+        rawSpeed: false,
         enableWatchdog: true,
         busy: false,
         error: "",
@@ -819,6 +840,8 @@ document.addEventListener("alpine:init", () => {
           subnet: r.subnet.trim(),
           controlPort: Number(r.controlPort) || 0,
           protocol: r.protocol,
+          bindAddr: r.bindAddr,
+          token: r.token.trim(),
           enableWatchdog: !!r.enableWatchdog,
         };
       } else {
@@ -831,6 +854,7 @@ document.addEventListener("alpine:init", () => {
           proto: r.proto,
           localIp: r.localIp.trim(),
           clientName: r.clientName.trim(),
+          rawSpeed: !!r.rawSpeed,
           enableWatchdog: !!r.enableWatchdog,
         };
         if (r.foreignPublicIp.trim()) body.foreignPublicIp = r.foreignPublicIp.trim();
@@ -961,13 +985,43 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    async openEdit(row) {
+      const name = row.name;
+      try {
+        // Template / unparseable configs can only be edited as raw TOML.
+        if ((row.style || "managed") !== "managed") {
+          await this.openRaw(name);
+          return;
+        }
+        const d = await FRP.api(`/api/servers/${encodeURIComponent(name)}`);
+        const c = d.config || {};
+        const style = d.style || c.style || row.style || "managed";
+        if (style !== "managed") {
+          await this.openRaw(name);
+          return;
+        }
+        const bind = c.bindAddr || "::";
+        const known = this.bindChoices().some((x) => x.v === bind && x.v !== "custom");
+        this.edit = {
+          name,
+          style,
+          bindPort: c.bindPort || 7000,
+          bindAddr: known ? bind : "custom",
+          customBind: known ? "" : bind,
+          protocol: c.protocol === "tcp" ? "none" : c.protocol || "quic",
+          token: d.token || "",
+          tcpMux: !!c.tcpMux,
+          busy: false,
+          error: "",
+        };
+      } catch (e) {
+        this.$store.ui.push(`cannot open ${name}: ${e.message}`, "bad");
+      }
+    },
+
     async saveEdit() {
       const e = this.edit;
       if (!e) return;
-      if (e.style !== "managed") {
-        this.$store.ui.push("structured edits need a managed config — use the raw editor", "warn");
-        return;
-      }
       e.busy = true;
       e.error = "";
       const bind = e.bindAddr === "custom" ? e.customBind.trim() : e.bindAddr;
@@ -979,7 +1033,7 @@ document.addEventListener("alpine:init", () => {
             bindAddr: bind,
             protocol: e.protocol,
             tcpMux: e.tcpMux,
-            token: e.token.trim(),
+            ...(e.token.trim() ? { token: e.token.trim() } : {}),
           },
         });
         this.$store.ui.push(
@@ -989,6 +1043,12 @@ document.addEventListener("alpine:init", () => {
         this.edit = null;
         this.load();
       } catch (err) {
+        if (/raw|TOML/i.test(err.message)) {
+          this.edit = null;
+          await this.openRaw(e.name);
+          this.$store.ui.push(err.message, "warn");
+          return;
+        }
         e.error = err.message;
         e.busy = false;
       }
@@ -1149,15 +1209,31 @@ document.addEventListener("alpine:init", () => {
         token: first ? first.token : "",
         protocol: "tcp",
         useTls: true,
+        useEncryption: true,
         useCompression: false,
+        rawSpeed: false,
         tcpMux: false,
         proto: "both",
-        ports: "22,6000-6006",
+        ports: "8989,8443,2053",
         localIp: "127.0.0.1",
         webEnabled: true,
         busy: false,
         error: "",
       };
+    },
+
+    applyRawSpeed(target) {
+      const v = target === "wiz" ? this.wiz : this.edit;
+      if (!v) return;
+      if (v.rawSpeed) {
+        v.useTls = false;
+        v.useEncryption = false;
+        v.useCompression = false;
+        v.tcpMux = false;
+      } else {
+        v.useTls = true;
+        v.useEncryption = true;
+      }
     },
 
     tokenSources() {
@@ -1192,6 +1268,7 @@ document.addEventListener("alpine:init", () => {
             token: w.token.trim(),
             protocol: w.protocol,
             useTls: w.useTls,
+            useEncryption: w.useEncryption,
             useCompression: w.useCompression,
             tcpMux: w.tcpMux,
             proto: w.proto,
@@ -1269,19 +1346,46 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    openEdit(row) {
-      this.edit = {
-        name: row.name,
-        serverAddr: row.serverAddr,
-        serverPort: row.serverPort,
-        token: "",
-        protocol: row.protocol || "tcp",
-        useTls: !!row.tls,
-        useCompression: false,
-        tcpMux: !!row.tcpMux,
-        busy: false,
-        error: "",
-      };
+    async openEdit(row) {
+      try {
+        if ((row.style || "managed") !== "managed") {
+          await this.openRaw(row.name);
+          return;
+        }
+        const d = await FRP.api(`/api/clients/${encodeURIComponent(row.name)}`);
+        const c = d.config || {};
+        const style = d.style || c.style || row.style || "managed";
+        if (style !== "managed") {
+          await this.openRaw(row.name);
+          return;
+        }
+        const proxies = c.proxies || row.proxies || [];
+        const ports = [...new Set(proxies.map((p) => p.remotePort))].sort((a, b) => a - b);
+        const hasTCP = proxies.some((p) => p.type === "tcp");
+        const hasUDP = proxies.some((p) => p.type === "udp");
+        const first = proxies[0] || {};
+        const enc = first.useEncryption !== false;
+        this.edit = {
+          name: row.name,
+          style,
+          serverAddr: c.serverAddr || row.serverAddr,
+          serverPort: c.serverPort || row.serverPort,
+          token: "",
+          protocol: c.protocol || row.protocol || "tcp",
+          ports: ports.join(","),
+          proto: hasTCP && hasUDP ? "both" : hasUDP ? "udp" : "tcp",
+          localIp: first.localIp || "127.0.0.1",
+          useTls: c.tls !== undefined ? !!c.tls : !!row.tls,
+          useEncryption: enc,
+          useCompression: !!first.useCompression,
+          tcpMux: c.tcpMux !== undefined ? !!c.tcpMux : !!row.tcpMux,
+          rawSpeed: !(c.tls !== undefined ? c.tls : row.tls) && !enc,
+          busy: false,
+          error: "",
+        };
+      } catch (e) {
+        this.$store.ui.push(`cannot open ${row.name}: ${e.message}`, "bad");
+      }
     },
 
     async saveEdit() {
@@ -1297,8 +1401,12 @@ document.addEventListener("alpine:init", () => {
             serverPort: Number(e.serverPort),
             protocol: e.protocol,
             useTls: e.useTls,
+            useEncryption: e.useEncryption,
             useCompression: e.useCompression,
             tcpMux: e.tcpMux,
+            ports: e.ports.trim(),
+            proto: e.proto,
+            localIp: e.localIp.trim(),
             ...(e.token.trim() ? { token: e.token.trim() } : {}),
           },
         });
@@ -1306,6 +1414,12 @@ document.addEventListener("alpine:init", () => {
         this.edit = null;
         this.load();
       } catch (err) {
+        if (/raw|TOML/i.test(err.message)) {
+          this.edit = null;
+          await this.openRaw(e.name);
+          this.$store.ui.push(err.message, "warn");
+          return;
+        }
         e.error = err.message;
         e.busy = false;
       }

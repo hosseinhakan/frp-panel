@@ -54,7 +54,7 @@
       </div>
 
       <div class="sidefoot">
-        <div class="rowline"><span class="faint">panel</span><span class="mono" x-text="'v' + (health.version || '…')"></span></div>
+        <div class="rowline"><span class="faint">panel</span><span class="mono" x-text="FRP.versionLabel(health.version)"></span></div>
         <div class="rowline"><span class="faint">uptime</span><span class="mono" x-text="FRP.fmtUptime(health.uptime_seconds)"></span></div>
       </div>
     </aside>
@@ -105,7 +105,7 @@
               </div>
               <div class="stat">
                 <div class="stat-label">watchdog</div>
-                <div class="stat-value" x-text="watchdog && watchdog.unit ? watchdog.unit.active : '—'"></div>
+                <div class="stat-value" x-text="watchdog && watchdog.unit ? FRP.unitLabel(watchdog.unit.active) : '—'"></div>
                 <div class="stat-sub" x-text="watchdog && watchdog.config ? 'every ' + watchdog.config.interval + 's' : 'not configured'"></div>
               </div>
             </div>
@@ -189,10 +189,10 @@
                         <template x-for="s in g.items" :key="s.unit">
                           <div class="svc">
                             <div class="svc-top">
-                              <span class="pill" :class="pillFor(s.active)"><span class="dot"></span><span x-text="s.active"></span></span>
+                              <span class="pill" :class="pillFor(s.active)"><span class="dot"></span><span x-text="FRP.unitLabel(s.active)"></span></span>
                               <span class="svc-name" x-text="s.unit"></span>
                               <div class="grow"></div>
-                              <span class="svc-meta" x-text="s.enabled"></span>
+                              <span class="svc-meta" x-text="FRP.unitLabel(s.enabled, 'enabled')"></span>
                             </div>
                             <div class="svc-actions">
                               <button class="btn tiny" @click="unitAction(s.unit, 'start')">start</button>
@@ -309,12 +309,31 @@
                           </select>
                         </div>
                       </div>
+                      <div class="field-row mt05">
+                        <div class="field">
+                          <label>frps bind address</label>
+                          <select class="select mono" x-model="rev.bindAddr">
+                            <option value="" x-text="'GRE tunnel IP — ' + (rev.subnet || '10.100.111.0/30').replace('.0/30', '.2') + ' (recommended)'"></option>
+                            <option value="::">:: — dual-stack listeners</option>
+                            <option value="0.0.0.0">0.0.0.0 — all IPv4 interfaces</option>
+                          </select>
+                          <span class="hint">The control port is still dialled over the GRE IP; this only chooses what frps listens on.</span>
+                        </div>
+                        <div class="field">
+                          <label>Auth token (optional)</label>
+                          <div class="tokfield">
+                            <input class="input mono" x-model="rev.token" placeholder="auto-generate 32 chars" spellcheck="false">
+                            <button type="button" class="btn" @click="rev.token = FRP.genToken()">↻</button>
+                            <button type="button" class="btn" @click="revCopy(rev.token)">copy</button>
+                          </div>
+                        </div>
+                      </div>
                       <p class="faint small mt05">
                         Creates <span class="mono" x-text="rev.iface || 'gt11'"></span>
                         (<span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.2/30')"></span> ↔
                         <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1400,
-                        NOTRACK proto 47, TCPMSS clamp 1240/1220), generates a 32-char token, and binds frps
-                        strictly to the tunnel IP so it is invisible on the public internet.
+                        NOTRACK proto 47, TCPMSS clamp 1240/1220), uses your token (or auto-generates one),
+                        and binds frps to the GRE IP by default so the control port stays off the public internet.
                         Busy interfaces, subnets and ports are re-allocated automatically.
                       </p>
                       <template x-if="rev.error"><div class="notice bad mt05"><span x-text="rev.error"></span></div></template>
@@ -351,7 +370,10 @@
                       <div class="field-row mt05">
                         <div class="field">
                           <label>Token</label>
-                          <input class="input mono" x-model="rev.token" spellcheck="false" placeholder="from payload">
+                          <div class="tokfield">
+                            <input class="input mono" x-model="rev.token" spellcheck="false" placeholder="from payload">
+                            <button type="button" class="btn" @click="rev.token = FRP.genToken()">↻</button>
+                          </div>
                         </div>
                         <div class="field">
                           <label>Protocol</label>
@@ -369,13 +391,13 @@
                       </div>
                       <div class="field-row mt05">
                         <div class="field">
-                          <label>Local ports to expose</label>
-                          <input class="input mono" x-model="rev.localPorts" placeholder="8443,2053,443">
+                          <label>Ports (comma separated)</label>
+                          <input class="input mono" x-model="rev.localPorts" placeholder="8989,8443,2053">
                         </div>
                         <div class="field">
-                          <label>Emit</label>
+                          <label>Forward as</label>
                           <select class="select" x-model="rev.proto">
-                            <option value="both">TCP + UDP — paired rules per port</option>
+                            <option value="both">TCP + UDP</option>
                             <option value="tcp">TCP only</option>
                             <option value="udp">UDP only</option>
                           </select>
@@ -385,10 +407,18 @@
                           <input class="input mono" x-model="rev.localIp" placeholder="127.0.0.1">
                         </div>
                       </div>
+                      <div class="row mt1">
+                        <label class="check">
+                          <input type="checkbox" x-model="rev.rawSpeed">
+                          Raw speed — TLS &amp; FRP encryption OFF (use for VLESS/VMess/Hysteria already-encrypted traffic)
+                        </label>
+                      </div>
                       <p class="faint small mt05">
                         Creates the matching gt11 (<span class="mono">10.100.111.1/30 ↔ 10.100.111.2/30</span>)
-                        and an frpc instance with TLS + per-proxy encryption, compression off, then pings
-                        <span class="mono">10.100.111.2</span> and checks the frpc unit.
+                        and an frpc instance, then pings <span class="mono">10.100.111.2</span> and checks the
+                        frpc unit. Normal mode uses TLS + per-proxy encryption; raw speed sets
+                        <span class="mono">tls.enable=false</span>, <span class="mono">useEncryption=false</span>,
+                        compression and tcpMux off.
                       </p>
                       <template x-if="rev.error"><div class="notice bad mt05"><span x-text="rev.error"></span></div></template>
                       <div class="modal-foot">
@@ -463,7 +493,7 @@
                           <dl class="kv">
                             <dt>tunnel</dt><dd class="mono" x-text="rev.result.tunnel.iface + ' · ' + rev.result.tunnel.local_private_ip + ' ↔ ' + rev.result.tunnel.remote_private_ip"></dd>
                             <dt>frpc</dt><dd class="mono" x-text="'frpc@' + rev.result.client.name + ' → ' + rev.result.client.serverAddr + ':' + rev.result.client.serverPort"></dd>
-                            <dt>proxies</dt><dd x-text="rev.result.client.proxies + ' rules · tls ' + (rev.result.client.tls ? 'on' : 'off')"></dd>
+                            <dt>proxies</dt><dd x-text="rev.result.client.proxies + ' rules · tls ' + (rev.result.client.tls ? 'on' : 'off') + (rev.result.client.rawSpeed ? ' · raw speed' : '')"></dd>
                           </dl>
                           <template x-if="rev.result.unit_error || rev.result.tunnel_unit_error">
                             <div class="notice warn mt05">
@@ -539,8 +569,8 @@
                         <td>
                           <span class="pill" :class="r.tokenSet ? 'ok' : 'bad'" x-text="r.tokenSet ? 'set' : 'missing'"></span>
                         </td>
-                        <td><span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="r.unit.active"></span></td>
-                        <td><span class="pill" :class="r.unit.enabled === 'enabled' ? 'ok' : 'idle'" x-text="r.unit.enabled"></span></td>
+                        <td><span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="FRP.unitLabel(r.unit.active)"></span></td>
+                        <td><span class="pill" :class="r.unit.enabled === 'enabled' ? 'ok' : 'idle'" x-text="FRP.unitLabel(r.unit.enabled, 'enabled')"></span></td>
                         <td>
                           <div class="btn-row">
                             <template x-if="r.unit.active === 'active'">
@@ -554,7 +584,7 @@
                             </template>
                             <button class="btn tiny" @click="openEdit(r)">edit</button>
                             <button class="btn tiny" @click="regenerate(r)">retoken</button>
-                            <button class="btn tiny ghost" @click="openRaw(r.name)">toml</button>
+                            <button class="btn tiny" @click="openRaw(r.name)">toml</button>
                             <button class="btn tiny danger" @click="remove(r)">delete</button>
                           </div>
                         </td>
@@ -780,7 +810,7 @@
                 <div class="card">
                   <div class="card-head">
                     <span class="badge cli" x-text="'frpc@' + r.name"></span>
-                    <span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="r.unit.active"></span>
+                    <span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="FRP.unitLabel(r.unit.active)"></span>
                     <template x-if="r.style === 'advanced' || r.style === 'template'">
                       <span class="pill warn" x-text="r.style + ' — raw edits only'"></span>
                     </template>
@@ -805,7 +835,7 @@
                       </template>
                       <button class="btn tiny" @click="toggleExpand(r.name)" x-text="expanded === r.name ? 'hide ports' : 'ports'"></button>
                       <button class="btn tiny" @click="openEdit(r)">edit</button>
-                      <button class="btn tiny ghost" @click="openRaw(r.name)">toml</button>
+                      <button class="btn tiny" @click="openRaw(r.name)">toml</button>
                       <button class="btn tiny danger" @click="remove(r)">delete</button>
                     </div>
                   </div>
@@ -837,7 +867,7 @@
                           <div class="field-row">
                             <div class="field">
                               <label>Ports / ranges</label>
-                              <input class="input mono" x-model="addForm.ports" placeholder="22, 6000-6006">
+                              <input class="input mono" x-model="addForm.ports" placeholder="8989,8443,2053">
                             </div>
                             <div class="field">
                               <label>Emit</label>
@@ -916,8 +946,8 @@
                   </div>
                   <div class="field mt05">
                     <label>Ports / ranges</label>
-                    <input class="input mono" x-model="wiz.ports" placeholder="22, 6000-6006">
-                    <span class="hint">each port emits tcp-<em>p</em> and (toggle below) udp-<em>p</em> proxies</span>
+                    <input class="input mono" x-model="wiz.ports" placeholder="8989,8443,2053">
+                    <span class="hint">comma-separated ports or ranges — each port emits tcp-<em>p</em> and, when selected, udp-<em>p</em></span>
                   </div>
                   <div class="field mt05">
                     <label>Protocol emission</label>
@@ -928,12 +958,19 @@
                     </select>
                   </div>
                   <div class="row mt1">
-                    <label class="check"><input type="checkbox" x-model="wiz.useTls"> transport TLS</label>
-                    <label class="check"><input type="checkbox" x-model="wiz.useCompression"> compression</label>
-                    <label class="check"><input type="checkbox" x-model="wiz.tcpMux"> tcpMux</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.rawSpeed" @change="applyRawSpeed('wiz')"> raw speed — TLS &amp; FRP encryption OFF</label>
+                  </div>
+                  <div class="row mt05">
+                    <label class="check"><input type="checkbox" x-model="wiz.useTls" :disabled="wiz.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.useCompression" :disabled="wiz.rawSpeed"> compression</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.tcpMux" :disabled="wiz.rawSpeed"> tcpMux</label>
                     <label class="check"><input type="checkbox" x-model="wiz.webEnabled"> metrics webServer (7400+)</label>
                   </div>
-                  <p class="faint small mt05">Encryption is always on for generated proxies.</p>
+                  <p class="faint small mt05">
+                    Raw speed matches <span class="mono">tls.enable=false</span>,
+                    <span class="mono">useEncryption=false</span>, compression and tcpMux off — best when the
+                    inner protocol (VLESS/VMess/Hysteria) is already encrypted.
+                  </p>
                   <template x-if="wiz.error"><div class="notice bad mt05"><span x-text="wiz.error"></span></div></template>
                   <div class="modal-foot">
                     <button type="button" class="btn ghost" @click="wiz = null">Cancel</button>
@@ -971,11 +1008,33 @@
                     <label>Auth token (leave blank to keep)</label>
                     <input class="input mono" x-model="edit.token" placeholder="unchanged" spellcheck="false">
                   </div>
-                  <div class="row mt1">
-                    <label class="check"><input type="checkbox" x-model="edit.useTls"> transport TLS</label>
-                    <label class="check"><input type="checkbox" x-model="edit.useCompression"> compression</label>
-                    <label class="check"><input type="checkbox" x-model="edit.tcpMux"> tcpMux</label>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>Forwarded ports (comma separated)</label>
+                      <input class="input mono" x-model="edit.ports" placeholder="8989,8443,2053">
+                    </div>
+                    <div class="field">
+                      <label>Forward as</label>
+                      <select class="select" x-model="edit.proto">
+                        <option value="both">TCP + UDP</option>
+                        <option value="tcp">TCP only</option>
+                        <option value="udp">UDP only</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label>Local IP</label>
+                      <input class="input mono" x-model="edit.localIp" placeholder="127.0.0.1">
+                    </div>
                   </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="edit.rawSpeed" @change="applyRawSpeed('edit')"> raw speed — TLS &amp; FRP encryption OFF</label>
+                  </div>
+                  <div class="row mt05">
+                    <label class="check"><input type="checkbox" x-model="edit.useTls" :disabled="edit.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="edit.useCompression" :disabled="edit.rawSpeed"> compression</label>
+                    <label class="check"><input type="checkbox" x-model="edit.tcpMux" :disabled="edit.rawSpeed"> tcpMux</label>
+                  </div>
+                  <p class="faint small mt05">Saving replaces the forwarded-port list; other TOML keys are preserved.</p>
                   <template x-if="edit.error"><div class="notice bad mt05"><span x-text="edit.error"></span></div></template>
                   <div class="modal-foot">
                     <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
@@ -1032,7 +1091,7 @@
               <template x-for="t in tunnels" :key="t.name">
                 <div class="svc">
                   <div class="svc-top">
-                    <span class="pill" :class="FRP.unitPill(t.status.unitActive)"><span class="dot"></span><span x-text="t.status.unitActive"></span></span>
+                    <span class="pill" :class="FRP.unitPill(t.status.unitActive)"><span class="dot"></span><span x-text="FRP.unitLabel(t.status.unitActive)"></span></span>
                     <span class="svc-name" x-text="t.iface"></span>
                     <div class="grow"></div>
                     <span class="pill" :class="t.status.ifaceUp ? 'ok' : 'idle'" x-text="t.status.ifaceUp ? 'iface up' : 'iface down'"></span>
@@ -1194,9 +1253,9 @@
                   </div>
                   <div class="row mb05">
                     <span class="pill" :class="FRP.unitPill(state.units['tunnel-turbo'].active)">
-                      <span class="dot"></span><span x-text="'tunnel-turbo ' + state.units['tunnel-turbo'].active"></span>
+                      <span class="dot"></span><span x-text="'tunnel-turbo ' + FRP.unitLabel(state.units['tunnel-turbo'].active)"></span>
                     </span>
-                    <span class="pill idle" x-text="'boot: ' + state.units['tunnel-turbo'].enabled"></span>
+                    <span class="pill idle" x-text="'boot: ' + FRP.unitLabel(state.units['tunnel-turbo'].enabled, 'enabled')"></span>
                   </div>
                   <template x-if="sysctlRows.length">
                     <div class="tblwrap">
@@ -1268,7 +1327,7 @@
                   <div class="row mt1">
                     <button class="btn okbtn" :disabled="busy" @click="zramOn()">Enable ZRAM</button>
                     <button class="btn danger" :disabled="busy || !zramActive" @click="zramOff()">Disable</button>
-                    <span class="pill idle" :class="FRP.unitPill(state.units['frp-zram'].active)" x-text="'frp-zram ' + state.units['frp-zram'].active"></span>
+                    <span class="pill idle" :class="FRP.unitPill(state.units['frp-zram'].active)" x-text="'frp-zram ' + FRP.unitLabel(state.units['frp-zram'].active)"></span>
                   </div>
                 </div>
               </template>
@@ -1566,7 +1625,7 @@
                     <h2>Configuration</h2>
                     <div class="grow"></div>
                     <template x-if="state && state.unit">
-                      <span class="pill" :class="FRP.unitPill(state.unit.active)" x-text="'frp-watchdog ' + state.unit.active"></span>
+                      <span class="pill" :class="FRP.unitPill(state.unit.active)" x-text="'frp-watchdog ' + FRP.unitLabel(state.unit.active)"></span>
                     </template>
                   </div>
                   <div class="row mb05">

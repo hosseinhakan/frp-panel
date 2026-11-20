@@ -38,7 +38,7 @@ type greStatus struct {
 
 type greTunnelResp struct {
 	gre.Tunnel
-	EnvFile  string    `json:"envFile"`
+	EnvFile string    `json:"envFile"`
 	Status  greStatus `json:"status"`
 }
 
@@ -79,9 +79,9 @@ func (s *Server) greResp(t gre.Tunnel) greTunnelResp {
 	resp := greTunnelResp{Tunnel: t, EnvFile: filepath.Join(s.paths.GREDir, t.Name+".env")}
 
 	if out, err := s.runner.Systemctl("is-active", "gre-tunnel@"+t.Name); err == nil {
-		resp.Status.UnitActive = strings.TrimSpace(out)
+		resp.Status.UnitActive = normalizeActive(out, nil)
 	} else {
-		resp.Status.UnitActive = "unknown"
+		resp.Status.UnitActive = normalizeActive("", err)
 	}
 	if st, err := os.Stat(filepath.Join(s.paths.SysNetDir, t.Iface)); err == nil && st.IsDir() {
 		resp.Status.IfaceUp = true
@@ -239,9 +239,9 @@ func (s *Server) handleGREMirror(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":       name,
-		"mirror":    t.Mirror(),
-		"env_file":  t.MirrorText(s.paths.GREDir),
+		"name":     name,
+		"mirror":   t.Mirror(),
+		"env_file": t.MirrorText(s.paths.GREDir),
 	})
 }
 

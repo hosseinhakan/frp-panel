@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -55,8 +56,8 @@ func TestParsePortSpecs(t *testing.T) {
 		{"70000", nil, true},
 		{"6000-5999", nil, true},
 		{"6000-70000", nil, true},
-		{"80,80", nil, true},               // duplicate single port
-		{"80,79-81", nil, true},            // duplicate inside range overlap
+		{"80,80", nil, true},    // duplicate single port
+		{"80,79-81", nil, true}, // duplicate inside range overlap
 		{"6000-6002,6003-6004", []PortSpec{{6000, 6002}, {6003, 6004}}, false},
 	}
 	for _, tc := range tests {
@@ -160,7 +161,7 @@ func serverQuicFixture() *ServerConfig {
 	c, err := NewServerConfig(ServerOptions{
 		BindAddr:    "10.100.111.2",
 		BindPort:    7000,
-		Protocol:   ProtoQUIC,
+		Protocol:    ProtoQUIC,
 		TCPMux:      false,
 		Token:       goldenToken,
 		WebPort:     7500,
@@ -174,12 +175,12 @@ func serverQuicFixture() *ServerConfig {
 
 func serverPlainFixture() *ServerConfig {
 	c, err := NewServerConfig(ServerOptions{
-		BindAddr:  "::",
-		BindPort:  7000,
-		Protocol:  ProtoNone,
-		Token:     goldenToken,
-		WebPort:   7501,
-		WebUser:   "admin",
+		BindAddr:    "::",
+		BindPort:    7000,
+		Protocol:    ProtoNone,
+		Token:       goldenToken,
+		WebPort:     7501,
+		WebUser:     "admin",
 		WebPassword: "FixtureWebPassPlain12345",
 	})
 	if err != nil {
@@ -194,14 +195,14 @@ func clientBothFixture() *ClientConfig {
 		panic(err)
 	}
 	c, err := NewClientConfig(ClientOptions{
-		ServerAddr: "10.100.111.2",
-		ServerPort: 7000,
-		Token:      goldenToken,
-		Protocol:   "tcp",
-		UseTLS:     true,
-		Ports:      ports,
-		Proto:      ProtoTCPAndUDP,
-		WebPort:    7400,
+		ServerAddr:  "10.100.111.2",
+		ServerPort:  7000,
+		Token:       goldenToken,
+		Protocol:    "tcp",
+		UseTLS:      true,
+		Ports:       ports,
+		Proto:       ProtoTCPAndUDP,
+		WebPort:     7400,
 		WebPassword: "FixtureWebPassClient12345",
 	})
 	if err != nil {
@@ -302,16 +303,73 @@ func TestClassify(t *testing.T) {
 		t.Errorf("golden server: style=%v unknown=%q err=%v, want managed", style, unknown, err)
 	}
 
-	advanced := []byte("serverAddr = \"1.2.3.4\"\nserverPort = 7000\n[log]\nto = \"file\"\n")
-	style, unknown, err = Classify(advanced, KindClient)
-	if err != nil || style != StyleAdvanced || unknown != "log" {
-		t.Errorf("advanced client: style=%v unknown=%q err=%v, want advanced/log", style, unknown, err)
+	// Valid TOML with extra keys stays structurally editable; "unknown" only
+	// tells the compose layer to merge those keys back on save.
+	extra := []byte("serverAddr = \"1.2.3.4\"\nserverPort = 7000\n[log]\nto = \"file\"\n")
+	style, unknown, err = Classify(extra, KindClient)
+	if err != nil || style != StyleManaged || unknown != "log" {
+		t.Errorf("extra-key client: style=%v unknown=%q err=%v, want managed/log", style, unknown, err)
 	}
 
 	template := []byte("serverAddr = \"1.2.3.4\"\n{{- range $_, $v := parseNumberRangePair \"6000-6001\" }}\n[[proxies]]\n{{- end }}\n")
 	style, _, err = Classify(template, KindClient)
 	if err != nil || style != StyleTemplate {
 		t.Errorf("template client: style=%v err=%v, want template", style, err)
+	}
+
+	broken := []byte("serverAddr = [\n")
+	style, _, err = Classify(broken, KindClient)
+	if err == nil || style != StyleAdvanced {
+		t.Errorf("broken client: style=%v err=%v, want advanced/error", style, err)
+	}
+
+	// The keys reported from live configs must not trigger the old lockout.
+	live := []byte("bindAddr = \"::\"\nbindPort = 7018\n" +
+		"transport.tcpMuxKeepaliveInterval = 10\n" +
+		"transport.quic.keepalivePeriod = 10\n" +
+		"transport.tls.enable = false\n")
+	style, unknown, err = Classify(live, KindServer)
+	if err != nil || style != StyleManaged {
+		t.Errorf("live server style=%v unknown=%q err=%v, want managed", style, unknown, err)
+	}
+	if unknown != "" && unknown != "transport.tls" {
+		t.Errorf("live server first unknown = %q, want transport.tls or empty", unknown)
+	}
+}
+
+func TestComposeClientPreservesExtraKeys(t *testing.T) {
+	raw := []byte(`serverAddr = "10.100.111.2"
+serverPort = 7000
+[log]
+to = "file"
+
+[[proxies]]
+name = "tcp-8989"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8989
+remotePort = 8989
+subdomain = "video"
+transport.useEncryption = true
+transport.useCompression = false
+[proxies.annotations]
+role = "stream"
+`)
+	cfg, err := ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Transport.TLS.Enable = false
+	cfg.Proxies[0].Transport.UseEncryption = false
+	out, err := ComposeClient(raw, cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"[log]", "subdomain", "video", "[proxies.annotations]", "role", "stream", "useEncryption = false"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("compose dropped %q:\n%s", want, s)
+		}
 	}
 }
 

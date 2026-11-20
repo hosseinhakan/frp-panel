@@ -227,9 +227,11 @@ emission := for each port p in expansion(p, udp_toggle, name_prefix):
   `parseNumberRangePair` rendering (kept working — it's the current behavior), while the
   panel always writes explicit blocks and warns above 200 proxies.
 - Parsing strategy: the panel **renders templates first** (same engine frp uses), so
-  template-based configs remain readable; structured edits fall back to raw-text mode
-  in the UI when a file contains unknown/advanced directives (flagged
-  `template-managed — edit as text`).
+  template-based configs remain readable. Valid TOML is always structurally editable:
+  managed fields are rewritten and keys outside the model (`[log]`, `transport.tls`,
+  vhosts, plugins, metadata, …) are merged back from the parsed tree. Only template
+  files and unparseable TOML open the raw editor, and clicking `edit` on those routes
+  straight to it instead of failing.
 
 ### 4.4 Token generator
 
@@ -296,7 +298,7 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | GET | `/api/stats?instance=…` | scraped frp webServer metrics + rolling history (conns, in/out bytes per proxy) |
 | GET | `/api/backup/export`, POST `/api/backup/import` | ZIP stream down / multipart restore (selective categories) |
 | GET | `/api/wizard/gre-frp/defaults` | next free GRE iface, `10.100.<n>.0/30` subnet and frps control port (scans envs, live links, configs, `/proc/net/tcp`) |
-| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict |
+| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict; optional custom token, frps bind (`GRE IP`/`::`/`0.0.0.0`) and `rawSpeed` |
 | GET | `/api/watchdog`, POST `/api/watchdog` | state, config (Telegram token masked), recent heal events |
 | POST | `/api/watchdog/test-telegram` | send one test alert using stored or posted credentials |
 | GET | `/api/health`, `/api/version` | unauthenticated liveness + build info |
@@ -455,8 +457,8 @@ P8 implementation notes:
 |---|---|
 | Login | centered card, one-time password notice, error shake, lockout hint |
 | Dashboard | node role badge (Iran/Foreign/standalone) + uptime; CPU/RAM/net sparklines; GRE + FRP status cards with quick restart; live latency chart (uPlot, per target); recent watchdog events |
-| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/regenerate-token); TOML editor (textarea, verify-on-save); New-Server wizard modal (port, protocol, mux, **bindAddr with auto-detected tunnel IPs**, token autogen + regenerate + copy) |
-| Clients | instances + proxy table with **tcp/udp type badges**; wizard: server token picker (reads local server TOMLs) or paste; per-rule TCP/UDP checkboxes |
+| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/regenerate-token); edit always opens (raw modal for template/unparseable files, merge-preserving form for valid TOML); TOML editor (textarea, verify-on-save); New-Server wizard modal (port, protocol, mux, **bindAddr with auto-detected tunnel IPs**, token autogen + regenerate + copy) |
+| Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list (`8989,8443,2053`) with a single TCP / TCP+UDP selector (edit replaces the list in place); **Raw speed** toggle turns TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
 | GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1400); **mirror-config** generator for the far node; delete with teardown confirmation |
 | Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); swap file card; GC cron status |
 | Logs | unit picker (frps@*/frpc@*/gre-turbo/watchdog), live SSE pane, pause/follow, level filter, colored timestamps |

@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.2 — faster, reliable edit + quick-setup workflow
+
+### Editing
+
+- `edit` now opens reliably for both frps and frpc. Template or unparseable
+  configs automatically open the raw TOML editor instead of doing nothing.
+- Valid TOML configs with extra keys (`[log]`, `transport.tls`, HTTP/HTTPS
+  vhosts, plugins, metadata, …) are structurally editable: only managed fields
+  are rewritten and every unknown key is merged back into the file.
+- Configs using `bindAddr = "::"`, `tcpMuxKeepaliveInterval`, `quic.*` and
+  `tls.enable` no longer get stuck behind `advanced — raw edits only`.
+- The table's `toml` action is a normal button like `edit`/`retoken`.
+
+### UI / status
+
+- Sidebar version strips any leading `v` (`1.2.2`, `v1.2.2`, `vv1.2.2` all
+  display as `v1.2.2`).
+- Missing/not-found/inactive units display `stopped`, and disabled units
+  display `disabled`, instead of `unknown`.
+
+### Quick setup & clients
+
+- Reverse wizard accepts a custom token (with one-click generation) and lets
+  frps bind to the GRE IP, `::`, or `0.0.0.0`.
+- New **Raw speed** toggle sets `tls.enable=false`, `useEncryption=false`,
+  compression off and `tcpMux=false` for already-encrypted inner protocols.
+- Clients and the wizard use a comma-separated port list
+  (`8989,8443,2053`) as the primary port editor; editing a client replaces the
+  forwarded list in place.
+
+### Installer
+
+- `scripts/install.sh` now runs `systemctl enable frp-panel` followed by
+  `systemctl restart frp-panel`, so upgrades actually restart an already-running
+  unit.
+
 ## v1.2.1 — public panel access by default
 
 - The panel bootstraps `bind = "0.0.0.0"` (all interfaces) instead of

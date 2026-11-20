@@ -17,21 +17,22 @@ import (
 // ---- DTOs ---------------------------------------------------------------------
 
 type clientCreateReq struct {
-	Name           string  `json:"name"`
-	ServerAddr     string  `json:"serverAddr"`
-	ServerPort     int     `json:"serverPort"`
-	Token          string  `json:"token"` // empty → reuse the single local server token
-	Protocol       string  `json:"protocol"` // tcp | websocket | quic | kcp
-	TCPMux         *bool   `json:"tcpMux"`
-	UseTLS         *bool   `json:"useTls"`     // default true
-	UseCompression *bool   `json:"useCompression"` // default false
-	Ports          string  `json:"ports"`  // "22,6000-6006"
-	Proto          string  `json:"proto"`  // both | tcp | udp (default both)
-	LocalIP        string  `json:"localIp"`
-	WebEnabled     *bool   `json:"webEnabled"` // default true
-	WebPort        int     `json:"webPort"`
-	WebUser        string  `json:"webUser"`
-	WebPassword    string  `json:"webPassword"`
+	Name           string `json:"name"`
+	ServerAddr     string `json:"serverAddr"`
+	ServerPort     int    `json:"serverPort"`
+	Token          string `json:"token"`    // empty → reuse the single local server token
+	Protocol       string `json:"protocol"` // tcp | websocket | quic | kcp
+	TCPMux         *bool  `json:"tcpMux"`
+	UseTLS         *bool  `json:"useTls"`         // default true
+	UseEncryption  *bool  `json:"useEncryption"`  // default true
+	UseCompression *bool  `json:"useCompression"` // default false
+	Ports          string `json:"ports"`          // "22,6000-6006"
+	Proto          string `json:"proto"`          // both | tcp | udp (default both)
+	LocalIP        string `json:"localIp"`
+	WebEnabled     *bool  `json:"webEnabled"` // default true
+	WebPort        int    `json:"webPort"`
+	WebUser        string `json:"webUser"`
+	WebPassword    string `json:"webPassword"`
 }
 
 type clientUpdateReq struct {
@@ -41,31 +42,37 @@ type clientUpdateReq struct {
 	Protocol       *string `json:"protocol"`
 	TCPMux         *bool   `json:"tcpMux"`
 	UseTLS         *bool   `json:"useTls"`
+	UseEncryption  *bool   `json:"useEncryption"`
 	UseCompression *bool   `json:"useCompression"`
+	Ports          *string `json:"ports"`
+	Proto          *string `json:"proto"`
+	LocalIP        *string `json:"localIp"`
 }
 
 type proxyDTO struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	LocalIP    string `json:"localIp"`
-	LocalPort  int    `json:"localPort"`
-	RemotePort int    `json:"remotePort"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	LocalIP        string `json:"localIp"`
+	LocalPort      int    `json:"localPort"`
+	RemotePort     int    `json:"remotePort"`
+	UseEncryption  bool   `json:"useEncryption"`
+	UseCompression bool   `json:"useCompression"`
 }
 
 type clientSummary struct {
-	Name        string     `json:"name"`
-	File        string     `json:"file"`
-	ServerAddr  string     `json:"serverAddr"`
-	ServerPort  int        `json:"serverPort"`
-	Protocol    string     `json:"protocol"`
-	TLS         bool       `json:"tls"`
-	TCPMux      bool       `json:"tcpMux"`
-	WebPort     int        `json:"webPort"`
-	TokenSet    bool       `json:"tokenSet"`
-	Proxies     []proxyDTO `json:"proxies"`
-	Style       string     `json:"style"`
-	Unit        unitState  `json:"unit"`
-	ParseError  string     `json:"parseError,omitempty"`
+	Name       string     `json:"name"`
+	File       string     `json:"file"`
+	ServerAddr string     `json:"serverAddr"`
+	ServerPort int        `json:"serverPort"`
+	Protocol   string     `json:"protocol"`
+	TLS        bool       `json:"tls"`
+	TCPMux     bool       `json:"tcpMux"`
+	WebPort    int        `json:"webPort"`
+	TokenSet   bool       `json:"tokenSet"`
+	Proxies    []proxyDTO `json:"proxies"`
+	Style      string     `json:"style"`
+	Unit       unitState  `json:"unit"`
+	ParseError string     `json:"parseError,omitempty"`
 }
 
 // ---- list / detail ------------------------------------------------------------
@@ -85,8 +92,8 @@ func (s *Server) handleClientsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) clientSummary(name string) clientSummary {
 	sum := clientSummary{
-		Name: name,
-		File: filepath.Join(s.paths.ClientDir, name+".toml"),
+		Name:    name,
+		File:    filepath.Join(s.paths.ClientDir, name+".toml"),
 		Proxies: []proxyDTO{},
 	}
 	raw, err := os.ReadFile(sum.File)
@@ -112,6 +119,8 @@ func (s *Server) clientSummary(name string) clientSummary {
 			sum.Proxies = append(sum.Proxies, proxyDTO{
 				Name: p.Name, Type: p.Type, LocalIP: p.LocalIP,
 				LocalPort: p.LocalPort, RemotePort: p.RemotePort,
+				UseEncryption:  p.Transport.UseEncryption,
+				UseCompression: p.Transport.UseCompression,
 			})
 		}
 	}
@@ -258,16 +267,17 @@ func (s *Server) handleClientsCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Secure transport default: TLS on unless the wizard says otherwise.
 	opts := frpconf.ClientOptions{
-		ServerAddr: req.ServerAddr,
-		ServerPort: req.ServerPort,
-		Token:      token,
-		Protocol:   strings.ToLower(req.Protocol),
-		Ports:      specs,
-		Proto:      proto,
-		LocalIP:    req.LocalIP,
-		UseTLS:     true,
-		WebUser:    req.WebUser,
-		WebPassword: req.WebPassword,
+		ServerAddr:    req.ServerAddr,
+		ServerPort:    req.ServerPort,
+		Token:         token,
+		Protocol:      strings.ToLower(req.Protocol),
+		Ports:         specs,
+		Proto:         proto,
+		LocalIP:       req.LocalIP,
+		UseTLS:        true,
+		UseEncryption: req.UseEncryption,
+		WebUser:       req.WebUser,
+		WebPassword:   req.WebPassword,
 	}
 	if req.TCPMux != nil {
 		opts.TCPMux = *req.TCPMux
@@ -390,7 +400,7 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 	style, _, _ := frpconf.Classify(raw, frpconf.KindClient)
 	if style != frpconf.StyleManaged {
 		writeErr(w, http.StatusConflict,
-			"instance %q is %s-managed — structured edits would drop unknown keys; use the raw editor instead",
+			"instance %q is %s-managed — open the raw TOML editor instead",
 			name, style.String())
 		return
 	}
@@ -405,6 +415,61 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+
+	replaceProxies := req.Ports != nil && strings.TrimSpace(*req.Ports) != ""
+	if replaceProxies || req.UseEncryption != nil || req.UseCompression != nil {
+		replaceProxies = true
+	}
+	if req.Ports != nil && strings.TrimSpace(*req.Ports) != "" {
+		specs, perr := frpconf.ParsePortSpecs(*req.Ports)
+		if perr != nil {
+			writeErr(w, http.StatusBadRequest, "%v", perr)
+			return
+		}
+		if len(specs) == 0 {
+			writeErr(w, http.StatusBadRequest, "ports is required")
+			return
+		}
+		protoName := "both"
+		if req.Proto != nil {
+			protoName = *req.Proto
+		}
+		proto, ok := protoFromWire(protoName)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "invalid proto %q (want both|tcp|udp)", protoName)
+			return
+		}
+		localIP := "127.0.0.1"
+		if len(cfg.Proxies) > 0 && cfg.Proxies[0].LocalIP != "" {
+			localIP = cfg.Proxies[0].LocalIP
+		}
+		if req.LocalIP != nil {
+			localIP = strings.TrimSpace(*req.LocalIP)
+		}
+		if net.ParseIP(localIP) == nil {
+			writeErr(w, http.StatusBadRequest, "invalid localIp %q", localIP)
+			return
+		}
+		used, uerr := s.allUsedPorts()
+		if uerr != nil {
+			writeErr(w, http.StatusInternalServerError, "cannot scan used ports: %v", uerr)
+			return
+		}
+		for _, p := range cfg.Proxies {
+			delete(used, p.RemotePort)
+		}
+		if collides := collide(specs, used); collides != "" {
+			writeErr(w, http.StatusConflict, "remote port(s) already in use: %s", collides)
+			return
+		}
+		enc, comp := true, false
+		if len(cfg.Proxies) > 0 {
+			enc = cfg.Proxies[0].Transport.UseEncryption
+			comp = cfg.Proxies[0].Transport.UseCompression
+		}
+		cfg.Proxies = frpconf.BuildProxies(specs, proto, localIP, enc, comp)
+	}
+
 	if req.ServerAddr != nil {
 		if net.ParseIP(*req.ServerAddr) == nil {
 			writeErr(w, http.StatusBadRequest, "invalid serverAddr %q", *req.ServerAddr)
@@ -441,13 +506,23 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.UseTLS != nil {
 		cfg.Transport.TLS.Enable = *req.UseTLS
 	}
+	if req.UseEncryption != nil {
+		for i := range cfg.Proxies {
+			cfg.Proxies[i].Transport.UseEncryption = *req.UseEncryption
+		}
+	}
 	if req.UseCompression != nil {
 		for i := range cfg.Proxies {
 			cfg.Proxies[i].Transport.UseCompression = *req.UseCompression
 		}
 	}
 
-	gate, err := s.writeGate(frpconf.KindClient, path, frpconf.RenderClient(cfg))
+	content, err := frpconf.ComposeClient(raw, cfg, replaceProxies)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	gate, err := s.writeGate(frpconf.KindClient, path, string(content))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return
@@ -455,7 +530,7 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 	s.restartIfActive("frpc@" + name)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "verify": gate.VerifyMode, "backup": gate.Backup,
-		"unit": s.unitState("frpc@" + name),
+		"proxies": len(cfg.Proxies), "unit": s.unitState("frpc@" + name),
 	})
 }
 
@@ -493,13 +568,13 @@ func (s *Server) handleClientDelete(w http.ResponseWriter, r *http.Request) {
 
 type proxiesAddReq struct {
 	Ports   string `json:"ports"`
-	Proto   string `json:"proto"`   // both | tcp | udp (default both)
+	Proto   string `json:"proto"` // both | tcp | udp (default both)
 	LocalIP string `json:"localIp"`
 }
 
 func (s *Server) handleClientProxiesAdd(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	cfg, _, path, ok := s.loadManagedClient(w, name)
+	cfg, raw, path, ok := s.loadManagedClient(w, name)
 	if !ok {
 		return
 	}
@@ -546,10 +621,19 @@ func (s *Server) handleClientProxiesAdd(w http.ResponseWriter, r *http.Request) 
 			localIP = "127.0.0.1"
 		}
 	}
-	added := frpconf.BuildProxies(specs, proto, localIP, true, proxyCompression(cfg))
+	enc := true
+	if len(cfg.Proxies) > 0 {
+		enc = cfg.Proxies[0].Transport.UseEncryption
+	}
+	added := frpconf.BuildProxies(specs, proto, localIP, enc, proxyCompression(cfg))
 	cfg.Proxies = append(cfg.Proxies, added...)
 
-	gate, err := s.writeGate(frpconf.KindClient, path, frpconf.RenderClient(cfg))
+	content, err := frpconf.ComposeClient(raw, cfg, true)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	gate, err := s.writeGate(frpconf.KindClient, path, string(content))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return
@@ -574,7 +658,7 @@ type proxiesReplaceReq struct {
 
 func (s *Server) handleClientProxiesReplace(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	cfg, _, path, ok := s.loadManagedClient(w, name)
+	cfg, raw, path, ok := s.loadManagedClient(w, name)
 	if !ok {
 		return
 	}
@@ -612,12 +696,20 @@ func (s *Server) handleClientProxiesReplace(w http.ResponseWriter, r *http.Reque
 		px.Name, px.Type, px.LocalIP = p.Name, p.Type, p.LocalIP
 		px.LocalPort, px.RemotePort = p.LocalPort, p.RemotePort
 		px.Transport.UseEncryption = true
+		if len(cfg.Proxies) > 0 {
+			px.Transport.UseEncryption = cfg.Proxies[0].Transport.UseEncryption
+		}
 		px.Transport.UseCompression = proxyCompression(cfg)
 		proxies = append(proxies, px)
 	}
 	cfg.Proxies = proxies
 
-	gate, err := s.writeGate(frpconf.KindClient, path, frpconf.RenderClient(cfg))
+	content, err := frpconf.ComposeClient(raw, cfg, true)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	gate, err := s.writeGate(frpconf.KindClient, path, string(content))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return
@@ -630,7 +722,7 @@ func (s *Server) handleClientProxiesReplace(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleClientProxiesDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	cfg, _, path, ok := s.loadManagedClient(w, name)
+	cfg, raw, path, ok := s.loadManagedClient(w, name)
 	if !ok {
 		return
 	}
@@ -670,7 +762,12 @@ func (s *Server) handleClientProxiesDelete(w http.ResponseWriter, r *http.Reques
 	}
 	cfg.Proxies = kept
 
-	gate, err := s.writeGate(frpconf.KindClient, path, frpconf.RenderClient(cfg))
+	content, err := frpconf.ComposeClient(raw, cfg, true)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	gate, err := s.writeGate(frpconf.KindClient, path, string(content))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return

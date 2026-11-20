@@ -50,12 +50,12 @@ func ReadClient(path string) (*ClientConfig, error) {
 type Style uint8
 
 const (
-	// StyleManaged: the file uses only keys the suite knows how to render —
-	// safe for structured read → edit → write round trips.
+	// StyleManaged: valid TOML. Structured edits are safe for every valid
+	// config: keys outside the modeled subset are carried through by
+	// MergeServer/MergeClient instead of being dropped.
 	StyleManaged Style = iota
-	// StyleAdvanced: valid TOML, but carries keys outside the managed subset
-	// (or hand-edited values). Structured edits would drop them; the panel
-	// must route these to the raw-text editor instead.
+	// StyleAdvanced: the file exists but is not parseable TOML. The panel
+	// routes these (and any write-gate failures) to the raw-text editor.
 	StyleAdvanced
 	// StyleTemplate: contains Go template directives ({{ ... }}), as written
 	// by the CLI's compact mode for very large port ranges. frp renders
@@ -75,8 +75,9 @@ func (s Style) String() string {
 }
 
 // Classify inspects raw config bytes and reports the safest editing mode.
-// unknown is the first key (dotted path) that falls outside the managed
-// subset, empty for managed/template styles.
+// unknown is the first key (dotted path) outside the modeled subset. It is
+// informational only: every parseable TOML config can be edited structurally
+// because ComposeServer/ComposeClient merge unknown keys back into the file.
 func Classify(raw []byte, kind Kind) (Style, string, error) {
 	if bytes.Contains(raw, []byte("{{")) {
 		return StyleTemplate, "", nil
@@ -85,19 +86,18 @@ func Classify(raw []byte, kind Kind) (Style, string, error) {
 	if err := toml.Unmarshal(raw, &m); err != nil {
 		return StyleAdvanced, "", fmt.Errorf("classify: %w", err)
 	}
+	var unknown string
 	if kind == KindServer {
-		if bad, ok := classifyServer(m); !ok {
-			return StyleAdvanced, bad, nil
-		}
+		unknown, _ = classifyServer(m)
 	} else {
-		if bad, ok := classifyClient(m); !ok {
-			return StyleAdvanced, bad, nil
-		}
+		unknown, _ = classifyClient(m)
 	}
-	return StyleManaged, "", nil
+	return StyleManaged, unknown, nil
 }
 
-// Known key sets: everything outside these marks a file as StyleAdvanced.
+// Known key sets exactly match what the canonical renderers emit. A key
+// outside these sets sets `unknown`, which makes ComposeServer/ComposeClient
+// take the merge path and preserve it. It never locks the structured editor.
 var (
 	serverTopKeys = map[string]bool{
 		"bindAddr": true, "bindPort": true, "quicBindPort": true, "kcpBindPort": true,
@@ -119,7 +119,7 @@ var (
 	quicKeys = map[string]bool{
 		"keepalivePeriod": true, "maxIdleTimeout": true, "maxIncomingStreams": true,
 	}
-	authKeys = map[string]bool{"method": true, "token": true}
+	authKeys  = map[string]bool{"method": true, "token": true}
 	proxyKeys = map[string]bool{
 		"name": true, "type": true, "localIP": true, "localPort": true,
 		"remotePort": true, "transport": true,
@@ -237,8 +237,8 @@ func classifyClient(m map[string]any) (string, bool) {
 // webServerKeys is used by both kinds.
 var webServerKeys = map[string]bool{"addr": true, "port": true, "user": true, "password": true}
 
-// tlsKeys covers the frpc transport.tls subset.
-var tlsKeys = map[string]bool{"enable": true, "certFile": true, "keyFile": true, "trustedCaFile": true, "serverName": true}
+// tlsKeys covers the one TLS field the canonical client renderer emits.
+var tlsKeys = map[string]bool{"enable": true}
 
 // ListConfigs returns the .toml basenames (without extension) in a config dir.
 // These are the valid systemd instance names for frps@*/frpc@*.

@@ -106,8 +106,9 @@ type ClientOptions struct {
 	Token          string // required (must match the frps token)
 	Protocol       string // "tcp" | "websocket" | "quic" | "kcp" (default tcp)
 	TCPMux         bool
-	UseTLS         bool // default true (secure transport default)
-	UseCompression bool // default false (saves RAM)
+	UseTLS         bool  // default true (secure transport default)
+	UseEncryption  *bool // per-proxy encryption; nil = true (secure default)
+	UseCompression bool  // default false (saves RAM)
 	Ports          []PortSpec
 	Proto          ProtoToggle // default ProtoTCPAndUDP (dual TCP+UDP toggle)
 	LocalIP        string      // default "127.0.0.1"
@@ -176,7 +177,11 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 		c.WebServer = WebServer{Addr: o.WebAddr, Port: o.WebPort, User: o.WebUser, Password: o.WebPassword}
 	}
 
-	c.Proxies = BuildProxies(o.Ports, o.Proto, o.LocalIP, true, o.UseCompression)
+	encrypt := true
+	if o.UseEncryption != nil {
+		encrypt = *o.UseEncryption
+	}
+	c.Proxies = BuildProxies(o.Ports, o.Proto, o.LocalIP, encrypt, o.UseCompression)
 	return c, nil
 }
 

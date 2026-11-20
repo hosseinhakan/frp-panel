@@ -46,19 +46,53 @@ func (s *Server) handleServicesList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]serviceInfo, len(units))
 	for i, u := range units {
-		out[i] = serviceInfo{Unit: u, Active: "unknown", Enabled: "unknown"}
+		out[i] = serviceInfo{Unit: u, Active: "inactive", Enabled: "disabled"}
 	}
 	if len(units) > 0 {
 		// systemctl is-active/is-enabled accept multiple units and print
 		// one state per line — two calls total, not 2N.
 		if lines, err := s.runner.Systemctl(append([]string{"is-active"}, units...)...); err == nil {
-			setStates(out, strings.Fields(strings.TrimSpace(lines)), func(i int, v string) { out[i].Active = v })
+			setStates(out, strings.Fields(strings.TrimSpace(lines)), func(i int, v string) { out[i].Active = normalizeActive(v, nil) })
 		}
 		if lines, err := s.runner.Systemctl(append([]string{"is-enabled"}, units...)...); err == nil {
-			setStates(out, strings.Fields(strings.TrimSpace(lines)), func(i int, v string) { out[i].Enabled = v })
+			setStates(out, strings.Fields(strings.TrimSpace(lines)), func(i int, v string) { out[i].Enabled = normalizeEnabled(v, nil) })
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"services": out})
+}
+
+// normalizeActive turns a missing/not-found unit into "inactive" so the UI
+// can show "stopped" instead of a scary "unknown".
+func normalizeActive(out string, err error) string {
+	v := strings.TrimSpace(out)
+	if i := strings.IndexByte(v, '\n'); i >= 0 {
+		v = strings.TrimSpace(v[:i])
+	}
+	switch v {
+	case "active", "activating", "deactivating", "inactive", "failed", "reloading", "maintenance", "refreshing":
+		return v
+	}
+	if err != nil || v == "" || v == "unknown" || v == "not-found" || v == "dead" {
+		return "inactive"
+	}
+	return v
+}
+
+// normalizeEnabled maps not-found/unknown states to "disabled".
+func normalizeEnabled(out string, err error) string {
+	v := strings.TrimSpace(out)
+	if i := strings.IndexByte(v, '\n'); i >= 0 {
+		v = strings.TrimSpace(v[:i])
+	}
+	switch v {
+	case "enabled", "disabled", "static", "masked", "indirect", "generated",
+		"transient", "enabled-runtime", "disabled-runtime", "alias", "linked":
+		return v
+	}
+	if err != nil || v == "" || v == "unknown" || v == "not-found" {
+		return "disabled"
+	}
+	return v
 }
 
 func setStates(out []serviceInfo, states []string, set func(int, string)) {

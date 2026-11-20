@@ -13,6 +13,27 @@ import (
 	"github.com/frp-suite/panel/internal/frpconf"
 )
 
+func TestUnitStateLabels(t *testing.T) {
+	if got := normalizeActive("", nil); got != "inactive" {
+		t.Errorf("missing active state = %q, want inactive", got)
+	}
+	if got := normalizeActive("unknown", nil); got != "inactive" {
+		t.Errorf("unknown active state = %q, want inactive", got)
+	}
+	if got := normalizeActive("failed", nil); got != "failed" {
+		t.Errorf("failed active state = %q, want failed", got)
+	}
+	if got := normalizeEnabled("", nil); got != "disabled" {
+		t.Errorf("missing enabled state = %q, want disabled", got)
+	}
+	if got := normalizeEnabled("not-found", nil); got != "disabled" {
+		t.Errorf("not-found enabled state = %q, want disabled", got)
+	}
+	if got := normalizeEnabled("static", nil); got != "static" {
+		t.Errorf("static enabled state = %q, want static", got)
+	}
+}
+
 // jsonMap decodes a recorder body into a generic map.
 func jsonMap(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
@@ -266,33 +287,38 @@ func TestServerUpdateManagedAndBak(t *testing.T) {
 	}
 }
 
-func TestServerUpdateRefusesAdvancedStyle(t *testing.T) {
+func TestServerUpdatePreservesUnknownKeys(t *testing.T) {
 	e := newTestEnv(t)
 	dir := e.srv.paths.ServerDir
 	os.MkdirAll(dir, 0o755)
-	advanced := "bindAddr = \"::\"\nbindPort = 7000\n[log]\nto = \"file\"\n"
-	os.WriteFile(filepath.Join(dir, "adv.toml"), []byte(advanced), 0o600)
+	extra := "bindAddr = \"::\"\nbindPort = 7000\ntransport.tcpMuxKeepaliveInterval = 10\n" +
+		"transport.tls.force = true\n[log]\nto = \"file\"\n"
+	os.WriteFile(filepath.Join(dir, "adv.toml"), []byte(extra), 0o600)
 
-	rec := e.authorized(http.MethodPut, "/api/servers/adv", `{"bindPort":7500}`)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("advanced update = %d, want 409", rec.Code)
+	rec := e.authorized(http.MethodPut, "/api/servers/adv", `{"bindAddr":"10.100.111.2","tcpMux":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("extra-key update = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "adv.toml"))
+	cfg, err := frpconf.ParseServer(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BindAddr != "10.100.111.2" {
+		t.Errorf("bindAddr = %q, want 10.100.111.2", cfg.BindAddr)
+	}
+	if !strings.Contains(string(raw), "[log]") || !strings.Contains(string(raw), "file") {
+		t.Errorf("structured edit dropped [log]:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "force = true") || !strings.Contains(string(raw), "tls") {
+		t.Errorf("structured edit dropped transport.tls:\n%s", raw)
 	}
 
-	// Raw editor accepts it, keeps unknown keys, verify gate still runs.
-	rec = e.authorized(http.MethodPut, "/api/servers/adv/raw",
-		`{"content":"bindAddr = \"::\"\nbindPort = 7000\n[log]\nto = \"file\"\n"}`)
+	// Raw editor still round-trips the same file.
+	rec = e.authorized(http.MethodPut, "/api/servers/adv/raw", `{"content":"bindAddr = \"::\"\nbindPort = 7000\n[log]\nto = \"file\"\n"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("raw put = %d: %s", rec.Code, rec.Body.String())
 	}
-	if jsonMap(t, rec)["style"] != "advanced" {
-		t.Errorf("style = %v", jsonMap(t, rec)["style"])
-	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "adv.toml"))
-	if !strings.Contains(string(raw), "[log]") {
-		t.Error("raw edit dropped unknown keys")
-	}
-
-	// Raw GET round-trips.
 	rec = e.authorized(http.MethodGet, "/api/servers/adv/raw", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "[log]") {
 		t.Errorf("raw get = %d %s", rec.Code, rec.Body.String())
@@ -471,6 +497,59 @@ func TestClientProxiesAddReplaceDelete(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
 	if !strings.Contains(string(raw), "transport.tls.enable = false") {
 		t.Errorf("TLS not updated:\n%s", raw)
+	}
+
+	// Structured port + raw-speed edit replaces the forwarded list.
+	rec = e.authorized(http.MethodPut, "/api/clients/client-7000",
+		`{"ports":"8989,8443,2053","proto":"tcp","useEncryption":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("port edit = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ = os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
+	ccfg, err := frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ccfg.Proxies) != 3 {
+		t.Fatalf("proxies = %d, want 3", len(ccfg.Proxies))
+	}
+	for _, p := range ccfg.Proxies {
+		if p.RemotePort != 8989 && p.RemotePort != 8443 && p.RemotePort != 2053 {
+			t.Errorf("unexpected remote port %d", p.RemotePort)
+		}
+		if p.Transport.UseEncryption {
+			t.Errorf("proxy %s still encrypts after raw-speed edit", p.Name)
+		}
+	}
+
+	// Extra keys survive a structured connection edit (merge path).
+	withLog := string(raw) + "\n[log]\nto = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"), []byte(withLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec = e.authorized(http.MethodPut, "/api/clients/client-7000", `{"useTls":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge update = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ = os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
+	if !strings.Contains(string(raw), "[log]") {
+		t.Errorf("client merge dropped [log]:\n%s", raw)
+	}
+	rec = e.authorized(http.MethodPut, "/api/clients/client-7000",
+		`{"ports":"9443","proto":"tcp","useEncryption":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge port edit = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ = os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
+	ccfg, err = frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ccfg.Proxies) != 1 || ccfg.Proxies[0].RemotePort != 9443 {
+		t.Errorf("merge port edit proxies = %+v", ccfg.Proxies)
+	}
+	if !strings.Contains(string(raw), "[log]") {
+		t.Errorf("merge port edit dropped [log]:\n%s", raw)
 	}
 }
 

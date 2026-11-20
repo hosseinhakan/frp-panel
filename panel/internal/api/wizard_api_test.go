@@ -102,6 +102,66 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	}
 }
 
+func TestWizardIranCustomTokenAndBind(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8",`+
+			`"bindAddr":"::","token":"my-custom-token-123"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("wizard iran custom = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	server, _ := resp["server"].(map[string]any)
+	if server["bindAddr"] != "::" || server["token"] != "my-custom-token-123" {
+		t.Errorf("server = %v", server)
+	}
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.ServerDir, "server-7025.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `bindAddr = "::"`) ||
+		!strings.Contains(string(raw), `auth.token = "my-custom-token-123"`) {
+		t.Errorf("custom bind/token not written:\n%s", raw)
+	}
+	payload, _ := resp["mirror_payload"].(string)
+	if !strings.Contains(payload, "SERVER_ADDR=10.100.111.2") ||
+		!strings.Contains(payload, "TOKEN=my-custom-token-123") {
+		t.Errorf("mirror still must dial the GRE IP and carry the custom token:\n%s", payload)
+	}
+}
+
+func TestWizardForeignRawSpeed(t *testing.T) {
+	e := newTestEnv(t)
+	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
+		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
+		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) +
+		`,"localPorts":"443","proto":"tcp","rawSpeed":true}`
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("wizard foreign raw speed = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7025.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`transport.tls.enable = false`,
+		`transport.useEncryption = false`,
+		`transport.useCompression = false`,
+		`transport.tcpMux = false`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("raw-speed config missing %q:\n%s", want, raw)
+		}
+	}
+	client, _ := jsonMap(t, rec)["client"].(map[string]any)
+	if client["rawSpeed"] != true || client["tls"] != false {
+		t.Errorf("client response = %v", client)
+	}
+}
+
 func TestWizardForeignFromMirrorPayload(t *testing.T) {
 	e := newTestEnv(t)
 	e.runner.active["gre-tunnel@gt11"] = "active"

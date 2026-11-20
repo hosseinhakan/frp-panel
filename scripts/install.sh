@@ -283,7 +283,8 @@ mkdir -p "$CONF_DIR" "$LOG_DIR"
 # installs and check-sync.sh guards) — one source of truth.
 "${BIN_DIR}/frp-panel" install-unit
 systemctl daemon-reload
-systemctl enable --now frp-panel
+systemctl enable frp-panel
+systemctl restart frp-panel
 
 wait_for_panel_conf() { # first start bootstraps panel.toml; poll up to 10s
     local i

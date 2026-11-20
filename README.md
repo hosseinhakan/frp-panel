@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.1 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.2 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
@@ -70,8 +70,9 @@ IP**, at the same forwarded port.
    fresh host). The wizard creates:
    - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1400`,
      `NOTRACK` for proto 47 and TCPMSS clamping;
-   - a fresh 32-char token and an `frps` instance bound **strictly** to the
-     tunnel IP (`…2:<control_port>`), then enables both units;
+   - a 32-char token (or your own custom token) and an `frps` instance bound to
+     the tunnel IP by default — `::` and `0.0.0.0` are selectable in the form —
+     then enables both units;
    - the dual-layer auto-heal watchdog (`frp-watchdog`, 15s interval, 3 strikes,
      60s cooldown) — untick the wizard toggle to opt out.
 
@@ -82,13 +83,15 @@ IP**, at the same forwarded port.
 
    Copy the generated **mirror payload** (or the equivalent CLI command).
 2. **Foreign (exit)** — run the same wizard on the Foreign node, choose
-   **Foreign Node**, paste the payload, and enter the local ports to expose
-   (`8443,2053,443`) plus the TCP/UDP toggle. It creates the mirrored GRE
-   tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without touching the
-   mirrored `/30`) and an `frpc` instance with `tls.enable = true`, per-proxy
-   `useEncryption = true`, `useCompression = false`, then pings the Iran tunnel
-   IP through the interface and reports the frpc unit state. It also allocates
-   the loopback metrics `webServer` port the watchdog uses for proxy health.
+   **Foreign Node**, paste the payload, and enter a comma-separated local port
+   list (`8989,8443,2053`) plus the TCP / TCP+UDP selector. It creates the
+   mirrored GRE tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without
+   touching the mirrored `/30`) and an `frpc` instance. Normal mode uses
+   `tls.enable = true` + per-proxy `useEncryption = true`; **Raw speed** sets
+   TLS/encryption/compression/tcpMux off for already-encrypted traffic
+   (VLESS/VMess/Hysteria). It then pings the Iran tunnel IP and reports the
+   frpc unit state, and allocates the loopback metrics `webServer` port the
+   watchdog uses for proxy health.
 3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
    `1.2.3.4:443`).
 

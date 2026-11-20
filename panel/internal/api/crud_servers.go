@@ -22,21 +22,21 @@ var instanceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // ---- DTOs ------------------------------------------------------------------
 
 type serverCreateReq struct {
-	Name         string  `json:"name"`
-	BindPort     int     `json:"bindPort"`
-	BindAddr     string  `json:"bindAddr"`
-	Protocol     string  `json:"protocol"` // quic | kcp | none (default quic)
-	TCPMux       *bool   `json:"tcpMux"`
-	Token        string  `json:"token"`
-	WebEnabled   *bool   `json:"webEnabled"` // default true (metrics dashboard)
-	WebPort      int     `json:"webPort"`
-	WebUser      string  `json:"webUser"`
-	WebPassword  string  `json:"webPassword"`
+	Name        string `json:"name"`
+	BindPort    int    `json:"bindPort"`
+	BindAddr    string `json:"bindAddr"`
+	Protocol    string `json:"protocol"` // quic | kcp | none (default quic)
+	TCPMux      *bool  `json:"tcpMux"`
+	Token       string `json:"token"`
+	WebEnabled  *bool  `json:"webEnabled"` // default true (metrics dashboard)
+	WebPort     int    `json:"webPort"`
+	WebUser     string `json:"webUser"`
+	WebPassword string `json:"webPassword"`
 }
 
 type serverUpdateReq struct {
-	BindPort  *int    `json:"bindPort"`
-	BindAddr  *string `json:"bindAddr"`
+	BindPort *int    `json:"bindPort"`
+	BindAddr *string `json:"bindAddr"`
 	Protocol *string `json:"protocol"`
 	TCPMux   *bool   `json:"tcpMux"`
 	Token    *string `json:"token"`
@@ -57,6 +57,7 @@ type serverSummary struct {
 	WebPort    int       `json:"webPort"`
 	WebUser    string    `json:"webUser,omitempty"`
 	TokenSet   bool      `json:"tokenSet"`
+	TCPMux     bool      `json:"tcpMux"`
 	Style      string    `json:"style"`
 	Unit       unitState `json:"unit"`
 	ParseError string    `json:"parseError,omitempty"`
@@ -101,6 +102,7 @@ func (s *Server) serverSummary(name string) serverSummary {
 		sum.WebPort = cfg.WebServer.Port
 		sum.WebUser = cfg.WebServer.User
 		sum.TokenSet = cfg.Auth.Token != ""
+		sum.TCPMux = cfg.Transport.TCPMux
 	}
 	sum.Unit = s.unitState("frps@" + name)
 	return sum
@@ -109,15 +111,15 @@ func (s *Server) serverSummary(name string) serverSummary {
 func (s *Server) unitState(unit string) unitState {
 	st := unitState{}
 	if out, err := s.runner.Systemctl("is-active", unit); err == nil {
-		st.Active = strings.TrimSpace(out)
+		st.Active = normalizeActive(out, nil)
 	} else {
-		st.Active = "unknown"
+		st.Active = normalizeActive("", err)
 		st.Error = strings.TrimSpace(out)
 	}
 	if out, err := s.runner.Systemctl("is-enabled", unit); err == nil {
-		st.Enabled = strings.TrimSpace(out)
+		st.Enabled = normalizeEnabled(out, nil)
 	} else {
-		st.Enabled = "unknown"
+		st.Enabled = normalizeEnabled("", err)
 	}
 	return st
 }
@@ -199,12 +201,12 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		webEnabled = *req.WebEnabled
 	}
 	opts := frpconf.ServerOptions{
-		BindAddr:     req.BindAddr,
-		BindPort:     req.BindPort,
-		Protocol:     proto,
-		Token:        req.Token,
-		WebUser:      req.WebUser,
-		WebPassword:  req.WebPassword,
+		BindAddr:    req.BindAddr,
+		BindPort:    req.BindPort,
+		Protocol:    proto,
+		Token:       req.Token,
+		WebUser:     req.WebUser,
+		WebPassword: req.WebPassword,
 	}
 	if req.TCPMux != nil {
 		opts.TCPMux = *req.TCPMux
@@ -269,7 +271,7 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 
 type serverDetail struct {
 	serverSummary
-	Token    string `json:"token,omitempty"`
+	Token       string `json:"token,omitempty"`
 	WebPassword string `json:"webPassword,omitempty"`
 }
 
@@ -297,7 +299,7 @@ func (s *Server) handleServerGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "file": path, "style": detail.Style,
 		"config": detail.serverSummary,
-		"token": detail.Token, "webPassword": detail.WebPassword,
+		"token":  detail.Token, "webPassword": detail.WebPassword,
 	})
 }
 
@@ -322,8 +324,8 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 	style, _, _ := frpconf.Classify(raw, frpconf.KindServer)
 	if style != frpconf.StyleManaged {
 		writeErr(w, http.StatusConflict,
-			"instance %q is %s-managed — structured edits would drop unknown keys; use PUT /api/servers/%s/raw instead",
-			name, style.String(), name)
+			"instance %q is %s-managed — open the raw TOML editor instead",
+			name, style.String())
 		return
 	}
 	cfg, err := frpconf.ParseServer(raw)
@@ -395,7 +397,12 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 		cfg.Auth.Token = *req.Token
 	}
 
-	gate, err := s.writeGate(frpconf.KindServer, path, frpconf.RenderServer(cfg))
+	content, err := frpconf.ComposeServer(raw, cfg)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
+		return
+	}
+	gate, err := s.writeGate(frpconf.KindServer, path, string(content))
 	if err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return

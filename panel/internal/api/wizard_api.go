@@ -57,6 +57,8 @@ type wizardGREFRPReq struct {
 	Protocol        string `json:"protocol"` // tcp | quic | kcp
 	MSSMode         string `json:"mssMode"`  // optional; default 1220
 	ServerName      string `json:"serverName"`
+	BindAddr        string `json:"bindAddr"` // "" = allocated GRE IP; or "::" / "0.0.0.0"
+	RawSpeed        bool   `json:"rawSpeed"`
 
 	// Foreign (exit) inputs.
 	MirrorPayload  string `json:"mirrorPayload"`
@@ -120,6 +122,20 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	remotePriv := fmt.Sprintf("10.100.%d.1/30", octet)
 	serverAddr := fmt.Sprintf("10.100.%d.2", octet)
 
+	bindAddr := strings.TrimSpace(req.BindAddr)
+	if bindAddr == "" {
+		bindAddr = serverAddr // GRE-only by default
+	}
+	if ip := net.ParseIP(bindAddr); ip == nil {
+		writeErr(w, http.StatusBadRequest, "bindAddr must be ::, 0.0.0.0 or the GRE tunnel IP")
+		return
+	}
+	token := strings.TrimSpace(req.Token)
+	if token != "" && !wizardTokenPattern.MatchString(token) {
+		writeErr(w, http.StatusBadRequest, "token must be 8..128 chars of [A-Za-z0-9_.-]")
+		return
+	}
+
 	t, err := s.wizardTunnel(req.IranPublicIP, req.ForeignPublicIP, iface,
 		localPriv, remotePriv, req.MSSMode)
 	if err != nil {
@@ -173,9 +189,10 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	}
 
 	cfg, err := frpconf.NewServerConfig(frpconf.ServerOptions{
-		BindAddr: serverAddr,
+		BindAddr: bindAddr,
 		BindPort: port,
 		Protocol: proto,
+		Token:    token,
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot build frps config: %v", err)
@@ -209,7 +226,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		RemotePrivateIP: t.LocalPrivateIP,
 		MTU:             t.MTU,
 		MSSMode:         t.MSSMode,
-		ServerAddr:      cfg.BindAddr,
+		ServerAddr:      serverAddr, // frpc always dials the allocated GRE IP
 		ControlPort:     port,
 		Protocol:        protoName,
 		Token:           cfg.Auth.Token,
@@ -222,7 +239,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 
 	resp := map[string]any{
 		"role":     "iran",
-		"topology": wizardTopologyFor(t.Iface, cfg.BindAddr),
+		"topology": wizardTopologyFor(t.Iface, serverAddr),
 		"tunnel":   gres.Tunnel,
 		"warnings": append(append([]string{}, gres.Warnings...), autoWarnings...),
 		"backup":   gres.Backup,
@@ -368,6 +385,7 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
+	encrypt := !req.RawSpeed
 	cfg, err := frpconf.NewClientConfig(frpconf.ClientOptions{
 		ServerAddr:     mp.ServerAddr,
 		ServerPort:     mp.ControlPort,
@@ -376,7 +394,8 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		Ports:          specs,
 		Proto:          proto,
 		LocalIP:        localIP,
-		UseTLS:         true,
+		UseTLS:         !req.RawSpeed,
+		UseEncryption:  &encrypt,
 		UseCompression: false,
 		WebPort:        webPort,
 	})
@@ -419,7 +438,8 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		"client": map[string]any{
 			"name": name, "file": path, "serverAddr": cfg.ServerAddr,
 			"serverPort": cfg.ServerPort, "protocol": cfg.Transport.Protocol,
-			"tls": cfg.Transport.TLS.Enable, "proxies": len(cfg.Proxies),
+			"tls": cfg.Transport.TLS.Enable, "rawSpeed": req.RawSpeed,
+			"proxies": len(cfg.Proxies),
 			"webPort": cfg.WebServer.Port, "tokenSet": cfg.Auth.Token != "", "unit": unit,
 		},
 		"watchdog":  wd,

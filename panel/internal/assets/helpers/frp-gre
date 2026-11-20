@@ -4,12 +4,19 @@
 # Managed by frp-manager (CLI) and frp-panel (Web UI) — both write the same
 # /root/frp/gre/*.env definitions and drive this script via gre-tunnel@.service.
 #
-# Usage: frp-gre up|down|reload|status <tunnel-name>
+# The unit runs `up` once (ExecStartPre) and then `hold`, which keeps
+# re-asserting the interface + rules and lets systemd's Restart=always rebuild
+# the tunnel after a fatal failure. Every iptables change is -C-checked, so
+# repeated calls never duplicate rules.
+#
+# Usage: frp-gre up|down|reload|hold|status <tunnel-name>
 set -euo pipefail
 
 ENV_DIR="${FRP_GRE_ENV_DIR:-/root/frp/gre}"
+HOLD_INTERVAL="${FRP_GRE_HOLD_INTERVAL:-10}"
+IPT_WAIT="${FRP_GRE_IPT_WAIT:-5}"
 
-usage() { echo "usage: frp-gre up|down|reload|status <tunnel-name>" >&2; exit 2; }
+usage() { echo "usage: frp-gre up|down|reload|hold|status <tunnel-name>" >&2; exit 2; }
 
 load_env() {
     local name="${1:-}"
@@ -29,24 +36,27 @@ load_env() {
     MSS_MODE="${MSS_MODE:-clamp}"
 }
 
+ipt() { iptables -w "$IPT_WAIT" "$@"; }
+
 ipt_ensure() { # ipt_ensure <table> <chain> <rule...> — add once, idempotent
     local table="$1" chain="$2"; shift 2
-    iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1 \
-        || iptables -t "$table" -A "$chain" "$@"
+    ipt -t "$table" -C "$chain" "$@" >/dev/null 2>&1 \
+        || ipt -t "$table" -A "$chain" "$@"
 }
 
 ipt_purge() { # ipt_purge <table> <chain> <rule...> — remove every instance
     local table="$1" chain="$2"; shift 2
-    while iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1; do
-        iptables -t "$table" -D "$chain" "$@" >/dev/null 2>&1 || break
+    while ipt -t "$table" -C "$chain" "$@" >/dev/null 2>&1; do
+        ipt -t "$table" -D "$chain" "$@" >/dev/null 2>&1 || break
     done
 }
 
 notrack_ensure() { # notrack_ensure <PREROUTING|OUTPUT> — bypass conntrack for GRE (proto 47)
-    iptables -t raw -C "$1" -p 47 -j CT --notrack >/dev/null 2>&1 && return 0
-    iptables -t raw -C "$1" -p 47 -j NOTRACK >/dev/null 2>&1 && return 0
-    iptables -t raw -A "$1" -p 47 -j CT --notrack >/dev/null 2>&1 \
-        || iptables -t raw -A "$1" -p 47 -j NOTRACK
+    local chain="$1"
+    ipt -t raw -C "$chain" -p 47 -j CT --notrack >/dev/null 2>&1 && return 0
+    ipt -t raw -C "$chain" -p 47 -j NOTRACK >/dev/null 2>&1 && return 0
+    ipt -t raw -A "$chain" -p 47 -j CT --notrack >/dev/null 2>&1 \
+        || ipt -t raw -A "$chain" -p 47 -j NOTRACK
 }
 
 notrack_purge() {
@@ -79,7 +89,7 @@ mss_purge() { # remove every MSS variant for this interface
 }
 
 forward_rules() { # allow transit when the FORWARD policy is DROP
-    [[ "$(iptables -S FORWARD 2>/dev/null | head -n1)" == *"-P FORWARD DROP"* ]] || return 0
+    [[ "$(ipt -S FORWARD 2>/dev/null | head -n1)" == *"-P FORWARD DROP"* ]] || return 0
     ipt_ensure filter FORWARD -i "$IFACE" -j ACCEPT
     ipt_ensure filter FORWARD -o "$IFACE" -j ACCEPT
 }
@@ -89,20 +99,43 @@ forward_purge() {
     ipt_purge filter FORWARD -o "$IFACE" -j ACCEPT
 }
 
+disable_rp_filter() { # never let reverse GRE packets be dropped by rp_filter
+    local key
+    for key in net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
+               "net.ipv4.conf.${IFACE}.rp_filter"; do
+        if ! sysctl -w "${key}=0" >/dev/null 2>&1; then
+            echo "frp-gre: warning: could not set ${key}=0" >&2
+        fi
+    done
+}
+
 cmd_up() {
     load_env "${1:-}"
     if ip link show "$IFACE" >/dev/null 2>&1; then
         echo "frp-gre: interface $IFACE already exists, refreshing rules"
     else
-        ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 64
-        ip addr add "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
+        ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
     fi
-    ip link set "$IFACE" mtu "$MTU" up
+    ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
+    ip link set dev "$IFACE" mtu "$MTU" up
+    disable_rp_filter
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
     mss_rules
     forward_rules
     echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE"
+}
+
+cmd_hold() { # long-running keeper used by gre-tunnel@.service (Type=simple)
+    load_env "${1:-}"
+    trap 'exit 0' TERM INT
+    while true; do
+        if ! cmd_up "$1" >/dev/null 2>&1; then
+            echo "frp-gre: $IFACE re-ensure failed; exiting so systemd can restart the unit" >&2
+            exit 1
+        fi
+        sleep "$HOLD_INTERVAL"
+    done
 }
 
 cmd_down() {
@@ -133,7 +166,7 @@ cmd_status() {
 }
 
 case "${1:-}" in
-    up|down|reload|status) ;;
+    up|down|reload|hold|status) ;;
     *) usage ;;
 esac
 [[ $# -ge 2 ]] || usage

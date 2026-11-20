@@ -643,6 +643,7 @@ document.addEventListener("alpine:init", () => {
     loading: true,
     chart: null,
     _sig: "",
+    rev: null,
 
     async init() {
       await this.loadAll();
@@ -749,6 +750,100 @@ document.addEventListener("alpine:init", () => {
         this.$store.ui.push(`${action} ${unit}: ${e.message}`, "bad");
       }
       this.loadAll();
+    },
+
+    /* ---- FRP over GRE Reverse quick-setup wizard ------------------------- */
+
+    blankRev(role) {
+      const foreign = role === "foreign";
+      return {
+        step: role ? "form" : "role",
+        role: role || "",
+        iranPublicIp: "",
+        foreignPublicIp: "",
+        iface: foreign ? "" : "gt11",
+        controlPort: foreign ? "" : 7025,
+        protocol: foreign ? "" : "tcp",
+        mirrorPayload: "",
+        localPorts: "8443,2053,443",
+        proto: "both",
+        localIp: "127.0.0.1",
+        clientName: "",
+        token: "",
+        enableWatchdog: true,
+        busy: false,
+        error: "",
+        result: null,
+      };
+    },
+
+    openRevWizard() {
+      this.rev = this.blankRev("");
+    },
+
+    revPickRole(role) {
+      const keepWatchdog = this.rev ? this.rev.enableWatchdog : true;
+      this.rev = this.blankRev(role);
+      this.rev.enableWatchdog = keepWatchdog;
+    },
+
+    async revRun() {
+      const r = this.rev;
+      if (!r) return;
+      r.busy = true;
+      r.error = "";
+      let body;
+      if (r.role === "iran") {
+        body = {
+          role: "iran",
+          iranPublicIp: r.iranPublicIp.trim(),
+          foreignPublicIp: r.foreignPublicIp.trim(),
+          iface: r.iface.trim(),
+          controlPort: Number(r.controlPort) || 0,
+          protocol: r.protocol,
+          enableWatchdog: !!r.enableWatchdog,
+        };
+      } else {
+        // With a payload, only send fields the user actually filled in —
+        // otherwise UI defaults would override the pasted tunnel params.
+        body = {
+          role: "foreign",
+          mirrorPayload: r.mirrorPayload.trim(),
+          localPorts: r.localPorts.trim(),
+          proto: r.proto,
+          localIp: r.localIp.trim(),
+          clientName: r.clientName.trim(),
+          enableWatchdog: !!r.enableWatchdog,
+        };
+        if (r.foreignPublicIp.trim()) body.foreignPublicIp = r.foreignPublicIp.trim();
+        if (r.iranPublicIp.trim()) body.iranPublicIp = r.iranPublicIp.trim();
+        if (r.token.trim()) body.token = r.token.trim();
+        if (r.iface.trim()) body.iface = r.iface.trim();
+        if (r.controlPort !== "" && Number(r.controlPort) > 0) body.controlPort = Number(r.controlPort);
+        if (r.protocol) body.protocol = r.protocol;
+      }
+      try {
+        r.result = await FRP.api("/api/wizard/gre-frp", { method: "POST", body });
+        r.step = "result";
+        this.$store.ui.push(
+          r.role === "iran"
+            ? "Iran entry node ready — copy the mirror payload to the Foreign node"
+            : "Foreign exit node ready — see the link test",
+          "ok"
+        );
+        this.loadAll();
+      } catch (e) {
+        r.error = e.message;
+      }
+      r.busy = false;
+    },
+
+    async revCopy(text) {
+      const ok = await FRP.copy(text || "");
+      this.$store.ui.push(
+        ok ? "copied to clipboard" : "copy failed — select the text manually",
+        ok ? "ok" : "warn"
+      );
     },
   }));
 
@@ -1752,9 +1847,9 @@ document.addEventListener("alpine:init", () => {
         const active = this.state.unit && this.state.unit.active === "active";
         this.form = {
           enabled: !!active,
-          interval: c ? c.interval : 60,
+          interval: c ? c.interval : 15,
           threshold: c ? c.threshold : 3,
-          cooldown: c ? c.cooldown : 120,
+          cooldown: c ? c.cooldown : 60,
           pingTimeout: c ? c.ping_timeout : 2,
           tcpTimeout: c ? c.tcp_timeout : 3,
         };

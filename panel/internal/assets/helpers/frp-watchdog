@@ -1,11 +1,19 @@
 #!/bin/bash
-# frp-watchdog — auto-heal GRE tunnels and frpc connections (FRP Tunnel Suite).
+# frp-watchdog — dual-layer auto-heal for GRE links and FRP sessions.
 # Runs as frp-watchdog.service; heals with a failure threshold + cooldown so a
 # flapping link never causes a restart storm. Events go to the journal (stdout)
 # and to /var/log/frp-panel/watchdog.log for the panel to surface.
 #
+# Layer 1 (GRE):  ping each peer through its gtXX interface. After THRESHOLD
+#                 consecutive failures restart gre-tunnel@<iface>, then restart
+#                 every active frpc@* unit so FRP reconnects over the new path.
+# Layer 2 (FRP):  for every active frpc@*, test serverAddr:serverPort and, when
+#                 its loopback webServer is enabled, verify every proxy reports
+#                 "running" in /api/status. If GRE is healthy but these fail
+#                 THRESHOLD times, restart only that frpc@ unit.
+#
 # Config: /etc/frp-panel/watchdog.env
-#   INTERVAL=60  THRESHOLD=3  COOLDOWN=120  PING_TIMEOUT=2  TCP_TIMEOUT=3
+#   INTERVAL=15  THRESHOLD=3  COOLDOWN=60  PING_TIMEOUT=2  TCP_TIMEOUT=3
 # Canonical copy: panel/internal/assets/helpers/frp-watchdog (also embedded in frp-panel).
 set -uo pipefail   # deliberately NOT set -e: probe failures must not kill the loop
 
@@ -15,11 +23,14 @@ CLIENT_DIR="/root/frp/client"
 LOG_DIR="/var/log/frp-panel"
 STATE_DIR="/var/lib/frp-panel/watchdog"
 
-INTERVAL=60; THRESHOLD=3; COOLDOWN=120; PING_TIMEOUT=2; TCP_TIMEOUT=3
+INTERVAL=15; THRESHOLD=3; COOLDOWN=60; PING_TIMEOUT=2; TCP_TIMEOUT=3
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && source "$CONF"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+declare -A GRE_OK=()
+GRE_HEALTHY=1
 
 log() {
     local line
@@ -48,18 +59,20 @@ in_cooldown() { # in_cooldown <key>
     (( now - last < COOLDOWN ))
 }
 
-heal() { # heal <unit> <key> <reason>
-    if in_cooldown "$2"; then
-        log "skip restart of $1 — cooldown ${COOLDOWN}s active"
-        return
+heal() { # heal <unit> <key> <reason> [layer] [consecutive] — 0 when restarted
+    local unit="$1" key="$2" reason="$3" layer="${4:-gre}" consec="${5:-?}"
+    if in_cooldown "$key"; then
+        log "SKIP layer=$layer unit=$unit reason=\"$reason\" cooldown=${COOLDOWN}s remaining"
+        return 1
     fi
-    date +%s > "$STATE_DIR/$2.last"
-    if systemctl restart "$1" 2>/dev/null; then
-        log "RESTARTED $1 ($3)"
-    else
-        log "FAILED to restart $1 ($3)"
+    date +%s > "$STATE_DIR/$key.last"
+    if systemctl restart "$unit" 2>/dev/null; then
+        log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=ok"
+        echo 0 > "$STATE_DIR/$key.fails"
+        return 0
     fi
-    echo 0 > "$STATE_DIR/$2.fails"
+    log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=failed"
+    return 1
 }
 
 ping_ok() { # ping_ok <ip> [iface]
@@ -67,6 +80,13 @@ ping_ok() { # ping_ok <ip> [iface]
     if [[ "$1" == *:* ]]; then flags+=(-6); else flags+=(-4); fi
     [[ -n "${2:-}" ]] && flags+=(-I "$2")
     ping "${flags[@]}" "$1" >/dev/null 2>&1
+}
+
+ping_ok_tunnel() { # upgrade probe: 2 packets through the GRE interface
+    local peer="$1" iface="$2"
+    local flags=(-c2 -W"$PING_TIMEOUT")
+    if [[ "$peer" == *:* ]]; then flags+=(-6); else flags+=(-4); fi
+    ping "${flags[@]}" -I "$iface" "$peer" >/dev/null 2>&1
 }
 
 tcp_ok() { # tcp_ok <host> <port>
@@ -80,8 +100,60 @@ client_endpoint() { # client_endpoint <cfg> — echoes "addr port" (may be empty
     echo "$addr $port"
 }
 
+is_loopback_addr() {
+    case "${1:-}" in
+        127.*|localhost|::1|"[::1]") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+frp_proxies_running() { # <cfg>; 0 healthy, 1 unhealthy, 2 no loopback webServer
+    local cfg="$1" addr port user pass body total running url
+    addr=$(sed -n 's/^webServer.addr *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    port=$(sed -n 's/^webServer.port *= *\([0-9][0-9]*\)$/\1/p' "$cfg" | head -n1)
+    [[ -n "$port" ]] || return 2
+    [[ -n "$addr" ]] || addr="127.0.0.1"
+    is_loopback_addr "$addr" || return 2
+    command -v curl >/dev/null 2>&1 || return 2
+
+    user=$(sed -n 's/^webServer.user *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    pass=$(sed -n 's/^webServer.password *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    local host="$addr"
+    [[ "$addr" == *:* ]] && host="[${addr}]"
+    url="http://${host}:${port}/api/status"
+
+    if [[ -n "$user" ]]; then
+        body=$(curl -fsS --max-time "$TCP_TIMEOUT" -u "${user}:${pass}" "$url" 2>/dev/null) || return 1
+    else
+        body=$(curl -fsS --max-time "$TCP_TIMEOUT" "$url" 2>/dev/null) || return 1
+    fi
+    [[ -n "$body" ]] || return 1
+
+    total=$(grep -o '"status"[[:space:]]*:' <<<"$body" | wc -l | tr -d ' ')
+    running=$(grep -o '"status"[[:space:]]*:[[:space:]]*"running"' <<<"$body" | wc -l | tr -d ' ')
+    (( total > 0 && total == running ))
+}
+
+active_frpc_units() {
+    systemctl list-units --type=service --state=running --plain --no-legend 'frpc@*.service' 2>/dev/null \
+        | awk '$1 ~ /^frpc@/ { print $1 }'
+}
+
+restart_active_frpc() { # restart_active_frpc <reason>
+    local unit
+    for unit in $(active_frpc_units); do
+        if systemctl restart "$unit" 2>/dev/null; then
+            log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=ok"
+        else
+            log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=failed"
+        fi
+    done
+}
+
 check_gre() {
     local env fails peer
+    GRE_HEALTHY=1
+    GRE_OK=()
     for env in "$ENV_DIR"/*.env; do
         [[ -e "$env" ]] || return 0
         IFACE=""; REMOTE_PRIVATE_IP=""
@@ -89,53 +161,60 @@ check_gre() {
         source "$env"
         [[ -n "$IFACE" && -n "$REMOTE_PRIVATE_IP" ]] || continue
         peer="${REMOTE_PRIVATE_IP%%/*}"
-        if ip link show "$IFACE" >/dev/null 2>&1 && ping_ok "$peer" "$IFACE"; then
+
+        if ip link show "$IFACE" >/dev/null 2>&1 && ping_ok_tunnel "$peer" "$IFACE"; then
             fail_bump "gre-$IFACE" ok >/dev/null
+            GRE_OK[$IFACE]=1
             continue
         fi
+
+        GRE_OK[$IFACE]=0
+        GRE_HEALTHY=0
         fails=$(fail_bump "gre-$IFACE" fail)
         if (( fails >= THRESHOLD )); then
-            heal "gre-tunnel@$IFACE.service" "gre-$IFACE" "$fails consecutive probe failures to $peer via $IFACE"
+            if heal "gre-tunnel@$IFACE.service" "gre-$IFACE" \
+                    "$fails consecutive GRE probes to $peer via $IFACE failed" gre "$fails"; then
+                restart_active_frpc "GRE $IFACE rebuilt after $fails failed probes"
+            fi
         else
-            log "GRE $IFACE: probe failed ($fails/$THRESHOLD)"
+            log "GRE layer=1 iface=$IFACE status=degraded peer=$peer fails=$fails/$THRESHOLD"
         fi
     done
 }
 
 check_frpc() {
-    local unit name cfg addr port fails
-    for unit in $(systemctl list-unit-files 'frpc@*.service' --no-legend 2>/dev/null | awk '$2=="enabled"{print $1}'); do
+    local unit name cfg addr port fails reason mode
+    # Layer 2 only makes sense once the GRE path is healthy (or no GRE exists).
+    [[ "$GRE_HEALTHY" == "1" ]] || return 0
+
+    for unit in $(active_frpc_units); do
         name="${unit#frpc@}"; name="${name%.service}"
         cfg="$CLIENT_DIR/$name.toml"
         [[ -r "$cfg" ]] || continue
         read -r addr port <<< "$(client_endpoint "$cfg")"
+        [[ -n "$addr" && -n "$port" ]] || continue
 
-        if systemctl is-failed --quiet "$unit"; then
-            # Unit failed but server reachable => stalled process, restart it.
-            # Server unreachable => transport issue; frpc retries on its own.
-            if [[ -n "$addr" && -n "$port" ]] && ! tcp_ok "$addr" "$port"; then
-                fail_bump "frpc-$name" ok >/dev/null
-                continue
+        reason=""
+        if ! tcp_ok "$addr" "$port"; then
+            reason="control channel ${addr}:${port} unreachable"
+        else
+            frp_proxies_running "$cfg"
+            mode=$?
+            if (( mode == 1 )); then
+                reason="webServer /api/status reports non-running proxies"
             fi
-            fails=$(fail_bump "frpc-$name" fail)
-            if (( fails >= THRESHOLD )); then
-                heal "$unit" "frpc-$name" "unit failed while server ${addr:-?}:${port:-?} reachable (stall)"
-            else
-                log "frpc@$name: unit failed ($fails/$THRESHOLD)"
-            fi
+        fi
+
+        if [[ -z "$reason" ]]; then
+            fail_bump "frpc-$name" ok >/dev/null
             continue
         fi
 
-        [[ -n "$addr" && -n "$port" ]] || continue
-        if tcp_ok "$addr" "$port"; then
-            fail_bump "frpc-$name" ok >/dev/null
+        fails=$(fail_bump "frpc-$name" fail)
+        if (( fails >= THRESHOLD )); then
+            heal "$unit" "frpc-$name" "$reason ($fails consecutive checks)" frp "$fails" || true
         else
-            fails=$(fail_bump "frpc-$name" fail)
-            if (( fails >= THRESHOLD )); then
-                heal "$unit" "frpc-$name" "control channel ${addr}:${port} unreachable"
-            else
-                log "frpc@$name: control channel ${addr}:${port} unreachable ($fails/$THRESHOLD)"
-            fi
+            log "FRP layer=2 unit=$unit status=degraded reason=\"$reason\" fails=$fails/$THRESHOLD"
         fi
     done
 }

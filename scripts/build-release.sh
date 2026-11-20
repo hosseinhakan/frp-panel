@@ -27,16 +27,18 @@ for arch in amd64 arm64; do
     CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
         go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
         -o "$stage/frp-panel" ./cmd/frp-panel
+    chmod 0755 "$stage/frp-panel"
     if [[ -f "$ROOT/scripts/install.sh" ]]; then
         cp "$ROOT/scripts/install.sh" "$stage/"
+        chmod 0755 "$stage/install.sh"
     else
         echo "    note: scripts/install.sh missing — tarball ships binary only"
     fi
     tarball="$OUT/frp-panel_linux_$arch.tar.gz"
     if [[ -f "$ROOT/scripts/install.sh" ]]; then
-        tar -czf "$tarball" -C "$stage" frp-panel install.sh
+        tar --mode=0755 -czf "$tarball" -C "$stage" frp-panel install.sh
     else
-        tar -czf "$tarball" -C "$stage" frp-panel
+        tar --mode=0755 -czf "$tarball" -C "$stage" frp-panel
     fi
     (
         cd "$OUT"

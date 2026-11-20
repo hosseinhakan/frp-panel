@@ -17,8 +17,8 @@ import (
 
 	"github.com/frp-suite/panel/internal/cfg"
 	"github.com/frp-suite/panel/internal/prober"
-	"github.com/frp-suite/panel/internal/svc"
 	"github.com/frp-suite/panel/internal/stats"
+	"github.com/frp-suite/panel/internal/svc"
 	"github.com/frp-suite/panel/web"
 )
 
@@ -114,6 +114,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/gre/{name}", s.authed(s.handleGREDelete))
 	mux.HandleFunc("GET /api/gre/{name}/mirror", s.authed(s.handleGREMirror))
 	mux.HandleFunc("POST /api/gre/{name}/test", s.authed(s.handleGRETest))
+
+	// --- FRP over GRE Reverse quick-setup wizard (Iran entry + Foreign exit) ---
+	mux.HandleFunc("POST /api/wizard/gre-frp", s.authed(s.handleWizardGREFRP))
 
 	// --- turbo (kernel tuning + ZRAM) ---
 	mux.HandleFunc("GET /api/system/turbo", s.authed(s.handleTurboGet))

@@ -149,12 +149,19 @@ ensure_gre_assets() {
 # Managed by frp-manager (CLI) and frp-panel (Web UI) — both write the same
 # /root/frp/gre/*.env definitions and drive this script via gre-tunnel@.service.
 #
-# Usage: frp-gre up|down|reload|status <tunnel-name>
+# The unit runs `up` once (ExecStartPre) and then `hold`, which keeps
+# re-asserting the interface + rules and lets systemd's Restart=always rebuild
+# the tunnel after a fatal failure. Every iptables change is -C-checked, so
+# repeated calls never duplicate rules.
+#
+# Usage: frp-gre up|down|reload|hold|status <tunnel-name>
 set -euo pipefail
 
 ENV_DIR="${FRP_GRE_ENV_DIR:-/root/frp/gre}"
+HOLD_INTERVAL="${FRP_GRE_HOLD_INTERVAL:-10}"
+IPT_WAIT="${FRP_GRE_IPT_WAIT:-5}"
 
-usage() { echo "usage: frp-gre up|down|reload|status <tunnel-name>" >&2; exit 2; }
+usage() { echo "usage: frp-gre up|down|reload|hold|status <tunnel-name>" >&2; exit 2; }
 
 load_env() {
     local name="${1:-}"
@@ -174,24 +181,27 @@ load_env() {
     MSS_MODE="${MSS_MODE:-clamp}"
 }
 
+ipt() { iptables -w "$IPT_WAIT" "$@"; }
+
 ipt_ensure() { # ipt_ensure <table> <chain> <rule...> — add once, idempotent
     local table="$1" chain="$2"; shift 2
-    iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1 \
-        || iptables -t "$table" -A "$chain" "$@"
+    ipt -t "$table" -C "$chain" "$@" >/dev/null 2>&1 \
+        || ipt -t "$table" -A "$chain" "$@"
 }
 
 ipt_purge() { # ipt_purge <table> <chain> <rule...> — remove every instance
     local table="$1" chain="$2"; shift 2
-    while iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1; do
-        iptables -t "$table" -D "$chain" "$@" >/dev/null 2>&1 || break
+    while ipt -t "$table" -C "$chain" "$@" >/dev/null 2>&1; do
+        ipt -t "$table" -D "$chain" "$@" >/dev/null 2>&1 || break
     done
 }
 
 notrack_ensure() { # notrack_ensure <PREROUTING|OUTPUT> — bypass conntrack for GRE (proto 47)
-    iptables -t raw -C "$1" -p 47 -j CT --notrack >/dev/null 2>&1 && return 0
-    iptables -t raw -C "$1" -p 47 -j NOTRACK >/dev/null 2>&1 && return 0
-    iptables -t raw -A "$1" -p 47 -j CT --notrack >/dev/null 2>&1 \
-        || iptables -t raw -A "$1" -p 47 -j NOTRACK
+    local chain="$1"
+    ipt -t raw -C "$chain" -p 47 -j CT --notrack >/dev/null 2>&1 && return 0
+    ipt -t raw -C "$chain" -p 47 -j NOTRACK >/dev/null 2>&1 && return 0
+    ipt -t raw -A "$chain" -p 47 -j CT --notrack >/dev/null 2>&1 \
+        || ipt -t raw -A "$chain" -p 47 -j NOTRACK
 }
 
 notrack_purge() {
@@ -224,7 +234,7 @@ mss_purge() { # remove every MSS variant for this interface
 }
 
 forward_rules() { # allow transit when the FORWARD policy is DROP
-    [[ "$(iptables -S FORWARD 2>/dev/null | head -n1)" == *"-P FORWARD DROP"* ]] || return 0
+    [[ "$(ipt -S FORWARD 2>/dev/null | head -n1)" == *"-P FORWARD DROP"* ]] || return 0
     ipt_ensure filter FORWARD -i "$IFACE" -j ACCEPT
     ipt_ensure filter FORWARD -o "$IFACE" -j ACCEPT
 }
@@ -234,20 +244,43 @@ forward_purge() {
     ipt_purge filter FORWARD -o "$IFACE" -j ACCEPT
 }
 
+disable_rp_filter() { # never let reverse GRE packets be dropped by rp_filter
+    local key
+    for key in net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
+               "net.ipv4.conf.${IFACE}.rp_filter"; do
+        if ! sysctl -w "${key}=0" >/dev/null 2>&1; then
+            echo "frp-gre: warning: could not set ${key}=0" >&2
+        fi
+    done
+}
+
 cmd_up() {
     load_env "${1:-}"
     if ip link show "$IFACE" >/dev/null 2>&1; then
         echo "frp-gre: interface $IFACE already exists, refreshing rules"
     else
-        ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 64
-        ip addr add "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
+        ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
     fi
-    ip link set "$IFACE" mtu "$MTU" up
+    ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
+    ip link set dev "$IFACE" mtu "$MTU" up
+    disable_rp_filter
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
     mss_rules
     forward_rules
     echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE"
+}
+
+cmd_hold() { # long-running keeper used by gre-tunnel@.service (Type=simple)
+    load_env "${1:-}"
+    trap 'exit 0' TERM INT
+    while true; do
+        if ! cmd_up "$1" >/dev/null 2>&1; then
+            echo "frp-gre: $IFACE re-ensure failed; exiting so systemd can restart the unit" >&2
+            exit 1
+        fi
+        sleep "$HOLD_INTERVAL"
+    done
 }
 
 cmd_down() {
@@ -278,7 +311,7 @@ cmd_status() {
 }
 
 case "${1:-}" in
-    up|down|reload|status) ;;
+    up|down|reload|hold|status) ;;
     *) usage ;;
 esac
 [[ $# -ge 2 ]] || usage
@@ -291,15 +324,22 @@ ASSET_FRP_GRE
 [Unit]
 Description=GRE tunnel %i (FRP Tunnel Suite)
 Documentation=file:///root/frp/gre/%i.env
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/frp-gre up %i
-ExecStop=/usr/local/bin/frp-gre down %i
+Type=simple
+ExecStartPre=/usr/local/bin/frp-gre up %i
+ExecStart=/usr/local/bin/frp-gre hold %i
 ExecReload=/usr/local/bin/frp-gre reload %i
+ExecStop=/usr/local/bin/frp-gre down %i
+Restart=always
+RestartSec=2s
+Nice=-10
+OOMScoreAdjust=-900
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -317,8 +357,10 @@ ensure_turbo_assets() {
     if sync_asset /usr/local/bin/frp-turbo 0755 <<'ASSET_FRP_TURBO'
 #!/bin/bash
 # frp-turbo — persistent kernel/network tuning for the FRP Tunnel Suite.
-# Applies BBR + fq + high-throughput sysctls via a sysctl drop-in, ensures the
-# frp GC cron, and manages optional ZRAM (lz4) + swappiness tuning.
+# Applies BBR + fq + high-throughput / high-stability sysctls via a sysctl
+# drop-in, ensures the frp GC cron, and manages optional ZRAM (lz4) +
+# swappiness tuning. Conntrack tuning is applied only when conntrack is
+# actually loaded, so the script never fails on hosts without it.
 # Canonical copy: panel/internal/assets/helpers/frp-turbo (also embedded in frp-panel).
 #
 # Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status
@@ -348,10 +390,23 @@ net.ipv4.tcp_rmem = 4096 87380 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.somaxconn = 65535
 net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_tw_reuse = 1
 TURBO_SYSCTL
+
+    # Only add the conntrack key when the table is actually available. Writing
+    # an unknown key into the drop-in would make every later `sysctl --system`
+    # fail on hosts that do not load nf_conntrack.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        echo "net.netfilter.nf_conntrack_max = 1048576" >> "$SYSCTL_DROPIN"
+    fi
 }
 
 ensure_gc_cron() {
@@ -364,20 +419,22 @@ cmd_apply() {
     write_dropin
     echo "tcp_bbr" > "$BBR_MODULE_FILE"
     modprobe tcp_bbr 2>/dev/null || true
-    sysctl --system >/dev/null
+    if ! sysctl --system >/dev/null; then
+        echo "frp-turbo: warning: some sysctls could not be applied (kernel may not support them)" >&2
+    fi
     ensure_gc_cron
-    echo "frp-turbo: applied BBR + fq + tunnel sysctls ($SYSCTL_DROPIN); GC cron ensured"
+    echo "frp-turbo: applied BBR + fq + stability sysctls ($SYSCTL_DROPIN); GC cron ensured"
     cmd_status
 }
 
 cmd_revert() {
     rm -f "$SYSCTL_DROPIN"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: removed $SYSCTL_DROPIN (kernel keeps current values until reboot)"
 }
 
 cmd_status() {
-    local q cc bmss rmax wmax somax fwd dropin
+    local q cc bmss rmax wmax somax fwd ka ki kp reuse ct dropin
     q="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
     cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
     bmss="$(sysctl -n net.ipv4.tcp_base_mss 2>/dev/null || echo '?')"
@@ -385,9 +442,14 @@ cmd_status() {
     wmax="$(sysctl -n net.core.wmem_max 2>/dev/null || echo '?')"
     somax="$(sysctl -n net.core.somaxconn 2>/dev/null || echo '?')"
     fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+    ka="$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo '?')"
+    ki="$(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo '?')"
+    kp="$(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo '?')"
+    reuse="$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo '?')"
+    ct="$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 'n/a')"
     [[ -f "$SYSCTL_DROPIN" ]] && dropin="installed" || dropin="missing"
-    printf 'frp-turbo: qdisc=%s cc=%s tcp_base_mss=%s rmem_max=%s wmem_max=%s somaxconn=%s ip_forward=%s dropin=%s\n' \
-        "$q" "$cc" "$bmss" "$rmax" "$wmax" "$somax" "$fwd" "$dropin"
+    printf 'frp-turbo: qdisc=%s cc=%s tcp_base_mss=%s rmem_max=%s wmem_max=%s somaxconn=%s ip_forward=%s tcp_keepalive=%s/%s/%s tcp_tw_reuse=%s nf_conntrack_max=%s dropin=%s\n' \
+        "$q" "$cc" "$bmss" "$rmax" "$wmax" "$somax" "$fwd" "$ka" "$ki" "$kp" "$reuse" "$ct" "$dropin"
 }
 
 cmd_zram_on() {
@@ -414,7 +476,7 @@ cmd_zram_on() {
     mkswap /dev/zram0 >/dev/null
     swapon -p 100 /dev/zram0
     printf 'vm.swappiness = 10\n' > "$ZRAM_SYSCTL"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: zram0 swap on — ${ZRAM_SIZE_MB}MB ${ZRAM_ALGO}, priority 100, swappiness 10"
 }
 
@@ -422,7 +484,7 @@ cmd_zram_off() {
     swapoff /dev/zram0 >/dev/null 2>&1 || true
     echo 1 > /sys/block/zram0/reset 2>/dev/null || true
     rm -f "$ZRAM_SYSCTL"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: zram0 swap off"
 }
 
@@ -491,13 +553,21 @@ ensure_watchdog_assets() {
     local changed=""
     if sync_asset /usr/local/bin/frp-watchdog 0755 <<'ASSET_FRP_WATCHDOG'
 #!/bin/bash
-# frp-watchdog — auto-heal GRE tunnels and frpc connections (FRP Tunnel Suite).
+# frp-watchdog — dual-layer auto-heal for GRE links and FRP sessions.
 # Runs as frp-watchdog.service; heals with a failure threshold + cooldown so a
 # flapping link never causes a restart storm. Events go to the journal (stdout)
 # and to /var/log/frp-panel/watchdog.log for the panel to surface.
 #
+# Layer 1 (GRE):  ping each peer through its gtXX interface. After THRESHOLD
+#                 consecutive failures restart gre-tunnel@<iface>, then restart
+#                 every active frpc@* unit so FRP reconnects over the new path.
+# Layer 2 (FRP):  for every active frpc@*, test serverAddr:serverPort and, when
+#                 its loopback webServer is enabled, verify every proxy reports
+#                 "running" in /api/status. If GRE is healthy but these fail
+#                 THRESHOLD times, restart only that frpc@ unit.
+#
 # Config: /etc/frp-panel/watchdog.env
-#   INTERVAL=60  THRESHOLD=3  COOLDOWN=120  PING_TIMEOUT=2  TCP_TIMEOUT=3
+#   INTERVAL=15  THRESHOLD=3  COOLDOWN=60  PING_TIMEOUT=2  TCP_TIMEOUT=3
 # Canonical copy: panel/internal/assets/helpers/frp-watchdog (also embedded in frp-panel).
 set -uo pipefail   # deliberately NOT set -e: probe failures must not kill the loop
 
@@ -507,11 +577,14 @@ CLIENT_DIR="/root/frp/client"
 LOG_DIR="/var/log/frp-panel"
 STATE_DIR="/var/lib/frp-panel/watchdog"
 
-INTERVAL=60; THRESHOLD=3; COOLDOWN=120; PING_TIMEOUT=2; TCP_TIMEOUT=3
+INTERVAL=15; THRESHOLD=3; COOLDOWN=60; PING_TIMEOUT=2; TCP_TIMEOUT=3
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && source "$CONF"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+declare -A GRE_OK=()
+GRE_HEALTHY=1
 
 log() {
     local line
@@ -540,18 +613,20 @@ in_cooldown() { # in_cooldown <key>
     (( now - last < COOLDOWN ))
 }
 
-heal() { # heal <unit> <key> <reason>
-    if in_cooldown "$2"; then
-        log "skip restart of $1 — cooldown ${COOLDOWN}s active"
-        return
+heal() { # heal <unit> <key> <reason> [layer] [consecutive] — 0 when restarted
+    local unit="$1" key="$2" reason="$3" layer="${4:-gre}" consec="${5:-?}"
+    if in_cooldown "$key"; then
+        log "SKIP layer=$layer unit=$unit reason=\"$reason\" cooldown=${COOLDOWN}s remaining"
+        return 1
     fi
-    date +%s > "$STATE_DIR/$2.last"
-    if systemctl restart "$1" 2>/dev/null; then
-        log "RESTARTED $1 ($3)"
-    else
-        log "FAILED to restart $1 ($3)"
+    date +%s > "$STATE_DIR/$key.last"
+    if systemctl restart "$unit" 2>/dev/null; then
+        log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=ok"
+        echo 0 > "$STATE_DIR/$key.fails"
+        return 0
     fi
-    echo 0 > "$STATE_DIR/$2.fails"
+    log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=failed"
+    return 1
 }
 
 ping_ok() { # ping_ok <ip> [iface]
@@ -559,6 +634,13 @@ ping_ok() { # ping_ok <ip> [iface]
     if [[ "$1" == *:* ]]; then flags+=(-6); else flags+=(-4); fi
     [[ -n "${2:-}" ]] && flags+=(-I "$2")
     ping "${flags[@]}" "$1" >/dev/null 2>&1
+}
+
+ping_ok_tunnel() { # upgrade probe: 2 packets through the GRE interface
+    local peer="$1" iface="$2"
+    local flags=(-c2 -W"$PING_TIMEOUT")
+    if [[ "$peer" == *:* ]]; then flags+=(-6); else flags+=(-4); fi
+    ping "${flags[@]}" -I "$iface" "$peer" >/dev/null 2>&1
 }
 
 tcp_ok() { # tcp_ok <host> <port>
@@ -572,8 +654,60 @@ client_endpoint() { # client_endpoint <cfg> — echoes "addr port" (may be empty
     echo "$addr $port"
 }
 
+is_loopback_addr() {
+    case "${1:-}" in
+        127.*|localhost|::1|"[::1]") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+frp_proxies_running() { # <cfg>; 0 healthy, 1 unhealthy, 2 no loopback webServer
+    local cfg="$1" addr port user pass body total running url
+    addr=$(sed -n 's/^webServer.addr *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    port=$(sed -n 's/^webServer.port *= *\([0-9][0-9]*\)$/\1/p' "$cfg" | head -n1)
+    [[ -n "$port" ]] || return 2
+    [[ -n "$addr" ]] || addr="127.0.0.1"
+    is_loopback_addr "$addr" || return 2
+    command -v curl >/dev/null 2>&1 || return 2
+
+    user=$(sed -n 's/^webServer.user *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    pass=$(sed -n 's/^webServer.password *= *"\(.*\)"$/\1/p' "$cfg" | head -n1)
+    local host="$addr"
+    [[ "$addr" == *:* ]] && host="[${addr}]"
+    url="http://${host}:${port}/api/status"
+
+    if [[ -n "$user" ]]; then
+        body=$(curl -fsS --max-time "$TCP_TIMEOUT" -u "${user}:${pass}" "$url" 2>/dev/null) || return 1
+    else
+        body=$(curl -fsS --max-time "$TCP_TIMEOUT" "$url" 2>/dev/null) || return 1
+    fi
+    [[ -n "$body" ]] || return 1
+
+    total=$(grep -o '"status"[[:space:]]*:' <<<"$body" | wc -l | tr -d ' ')
+    running=$(grep -o '"status"[[:space:]]*:[[:space:]]*"running"' <<<"$body" | wc -l | tr -d ' ')
+    (( total > 0 && total == running ))
+}
+
+active_frpc_units() {
+    systemctl list-units --type=service --state=running --plain --no-legend 'frpc@*.service' 2>/dev/null \
+        | awk '$1 ~ /^frpc@/ { print $1 }'
+}
+
+restart_active_frpc() { # restart_active_frpc <reason>
+    local unit
+    for unit in $(active_frpc_units); do
+        if systemctl restart "$unit" 2>/dev/null; then
+            log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=ok"
+        else
+            log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=failed"
+        fi
+    done
+}
+
 check_gre() {
     local env fails peer
+    GRE_HEALTHY=1
+    GRE_OK=()
     for env in "$ENV_DIR"/*.env; do
         [[ -e "$env" ]] || return 0
         IFACE=""; REMOTE_PRIVATE_IP=""
@@ -581,53 +715,60 @@ check_gre() {
         source "$env"
         [[ -n "$IFACE" && -n "$REMOTE_PRIVATE_IP" ]] || continue
         peer="${REMOTE_PRIVATE_IP%%/*}"
-        if ip link show "$IFACE" >/dev/null 2>&1 && ping_ok "$peer" "$IFACE"; then
+
+        if ip link show "$IFACE" >/dev/null 2>&1 && ping_ok_tunnel "$peer" "$IFACE"; then
             fail_bump "gre-$IFACE" ok >/dev/null
+            GRE_OK[$IFACE]=1
             continue
         fi
+
+        GRE_OK[$IFACE]=0
+        GRE_HEALTHY=0
         fails=$(fail_bump "gre-$IFACE" fail)
         if (( fails >= THRESHOLD )); then
-            heal "gre-tunnel@$IFACE.service" "gre-$IFACE" "$fails consecutive probe failures to $peer via $IFACE"
+            if heal "gre-tunnel@$IFACE.service" "gre-$IFACE" \
+                    "$fails consecutive GRE probes to $peer via $IFACE failed" gre "$fails"; then
+                restart_active_frpc "GRE $IFACE rebuilt after $fails failed probes"
+            fi
         else
-            log "GRE $IFACE: probe failed ($fails/$THRESHOLD)"
+            log "GRE layer=1 iface=$IFACE status=degraded peer=$peer fails=$fails/$THRESHOLD"
         fi
     done
 }
 
 check_frpc() {
-    local unit name cfg addr port fails
-    for unit in $(systemctl list-unit-files 'frpc@*.service' --no-legend 2>/dev/null | awk '$2=="enabled"{print $1}'); do
+    local unit name cfg addr port fails reason mode
+    # Layer 2 only makes sense once the GRE path is healthy (or no GRE exists).
+    [[ "$GRE_HEALTHY" == "1" ]] || return 0
+
+    for unit in $(active_frpc_units); do
         name="${unit#frpc@}"; name="${name%.service}"
         cfg="$CLIENT_DIR/$name.toml"
         [[ -r "$cfg" ]] || continue
         read -r addr port <<< "$(client_endpoint "$cfg")"
+        [[ -n "$addr" && -n "$port" ]] || continue
 
-        if systemctl is-failed --quiet "$unit"; then
-            # Unit failed but server reachable => stalled process, restart it.
-            # Server unreachable => transport issue; frpc retries on its own.
-            if [[ -n "$addr" && -n "$port" ]] && ! tcp_ok "$addr" "$port"; then
-                fail_bump "frpc-$name" ok >/dev/null
-                continue
+        reason=""
+        if ! tcp_ok "$addr" "$port"; then
+            reason="control channel ${addr}:${port} unreachable"
+        else
+            frp_proxies_running "$cfg"
+            mode=$?
+            if (( mode == 1 )); then
+                reason="webServer /api/status reports non-running proxies"
             fi
-            fails=$(fail_bump "frpc-$name" fail)
-            if (( fails >= THRESHOLD )); then
-                heal "$unit" "frpc-$name" "unit failed while server ${addr:-?}:${port:-?} reachable (stall)"
-            else
-                log "frpc@$name: unit failed ($fails/$THRESHOLD)"
-            fi
+        fi
+
+        if [[ -z "$reason" ]]; then
+            fail_bump "frpc-$name" ok >/dev/null
             continue
         fi
 
-        [[ -n "$addr" && -n "$port" ]] || continue
-        if tcp_ok "$addr" "$port"; then
-            fail_bump "frpc-$name" ok >/dev/null
+        fails=$(fail_bump "frpc-$name" fail)
+        if (( fails >= THRESHOLD )); then
+            heal "$unit" "frpc-$name" "$reason ($fails consecutive checks)" frp "$fails" || true
         else
-            fails=$(fail_bump "frpc-$name" fail)
-            if (( fails >= THRESHOLD )); then
-                heal "$unit" "frpc-$name" "control channel ${addr}:${port} unreachable"
-            else
-                log "frpc@$name: control channel ${addr}:${port} unreachable ($fails/$THRESHOLD)"
-            fi
+            log "FRP layer=2 unit=$unit status=degraded reason=\"$reason\" fails=$fails/$THRESHOLD"
         fi
     done
 }
@@ -644,15 +785,19 @@ ASSET_FRP_WATCHDOG
     fi
     if sync_asset /etc/systemd/system/frp-watchdog.service 0644 <<'ASSET_FRP_WATCHDOG_SERVICE'
 [Unit]
-Description=FRP Tunnel Suite Watchdog (auto-heal GRE + frpc)
+Description=FRP Tunnel Suite Watchdog (dual-layer auto-heal: GRE + frpc)
 Documentation=file:///usr/local/bin/frp-watchdog
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/frp-watchdog
 Restart=always
-RestartSec=10
+RestartSec=2s
+Nice=-5
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target
@@ -905,16 +1050,21 @@ install_frp() {
 [Unit]
 Description=FRP Server Service (%i)
 Documentation=https://gofrp.org/en/docs/overview/
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
 
 [Service]
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_BIND_SERVICE CAP_SYS_PTRACE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10s
-LimitNOFILE=infinity
+Restart=always
+RestartSec=2s
+Nice=-10
+OOMScoreAdjust=-900
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -925,16 +1075,21 @@ ASSET_FRPS_SERVICE
 [Unit]
 Description=FRP Client Service (%i)
 Documentation=https://gofrp.org/en/docs/overview/
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
 
 [Service]
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_SYS_BIND_SERVICE CAP_SYS_PTRACE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10s
-LimitNOFILE=infinity
+Restart=always
+RestartSec=2s
+Nice=-10
+OOMScoreAdjust=-900
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -1045,11 +1200,11 @@ setup_server() {
         fi
         echo
 
-        echo "transport.heartbeatTimeout = 90"
+        echo "transport.heartbeatTimeout = 30"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = $( [[ $use_mux =~ ^[Yy]$ ]] && echo true || echo false )"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 120"
+        echo "transport.tcpKeepalive = 30"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -1273,11 +1428,11 @@ auth.token = "$auth_token"
 transport.protocol = "$transport"
 transport.tcpMux = $mux
 transport.tcpMuxKeepaliveInterval = 10
-transport.dialServerTimeout = 10
-transport.dialServerKeepalive = 120
-transport.poolCount = 20
-transport.heartbeatInterval = 30
-transport.heartbeatTimeout = 90
+transport.dialServerTimeout = 5
+transport.dialServerKeepalive = 30
+transport.poolCount = 30
+transport.heartbeatInterval = 10
+transport.heartbeatTimeout = 30
 transport.tls.enable = $tls_enabled
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
@@ -1323,11 +1478,11 @@ EOF
             echo "transport.protocol = \"$transport\""
             echo "transport.tcpMux = $mux"
             echo "transport.tcpMuxKeepaliveInterval = 10"
-            echo "transport.dialServerTimeout = 10"
-            echo "transport.dialServerKeepalive = 120"
-            echo "transport.poolCount = 20"
-            echo "transport.heartbeatInterval = 30"
-            echo "transport.heartbeatTimeout = 90"
+            echo "transport.dialServerTimeout = 5"
+            echo "transport.dialServerKeepalive = 30"
+            echo "transport.poolCount = 30"
+            echo "transport.heartbeatInterval = 10"
+            echo "transport.heartbeatTimeout = 30"
             echo "transport.tls.enable = $tls_enabled"
             echo "transport.quic.keepalivePeriod = 10"
             echo "transport.quic.maxIdleTimeout = 30"
@@ -1886,6 +2041,476 @@ MSS_MODE=${MSS_MODE:-clamp}
 EOF
 }
 
+# --- FRP over GRE Reverse quick-setup ------------------------------------------
+
+reverse_print_flow() {
+    echo "User ──► Iran Public IP:<port> ──► frps (Iran, 10.100.111.2) ──► GRE gt11 ──► frpc (Foreign, 10.100.111.1) ──► Foreign 127.0.0.1:<port>"
+}
+
+reverse_payload_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN
+    cat <<EOF
+# FRP Tunnel Suite — FRP over GRE Reverse mirror (paste on the FOREIGN / exit node)
+# Flow: User -> Iran Public IP:<port> -> frps (Iran) -> GRE gt11 -> frpc (Foreign) -> 127.0.0.1:<port>
+IFACE=$3
+LOCAL_PUBLIC_IP=$1
+REMOTE_PUBLIC_IP=$2
+LOCAL_PRIVATE_IP=$4
+REMOTE_PRIVATE_IP=$5
+MTU=$6
+MSS_MODE=$7
+SERVER_ADDR=$8
+CONTROL_PORT=$9
+PROTOCOL=${10}
+TOKEN=${11}
+EOF
+}
+
+reverse_cmd_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN
+    cat <<EOF
+frp-manager reverse foreign \\
+  --local-public "$1" \\
+  --remote-public "$2" \\
+  --iface "$3" \\
+  --local-private "$4" \\
+  --remote-private "$5" \\
+  --mtu "$6" \\
+  --mss "$7" \\
+  --server-addr "$8" \\
+  --control-port "$9" \\
+  --protocol "${10}" \\
+  --token "${11}" \\
+  --ports 8443,2053,443
+EOF
+}
+
+reverse_parse_payload() { # file-or-stdin; sets RP_* globals
+    local src="$1" line key val
+    RP_IFACE=""; RP_LOCAL_PUBLIC_IP=""; RP_REMOTE_PUBLIC_IP=""; RP_LOCAL_PRIVATE_IP=""
+    RP_REMOTE_PRIVATE_IP=""; RP_MTU=""; RP_MSS_MODE=""; RP_SERVER_ADDR=""
+    RP_CONTROL_PORT=""; RP_PROTOCOL=""; RP_TOKEN=""
+    [[ "$src" == "-" ]] && src="/dev/stdin"
+    if [[ ! -r "$src" ]]; then
+        print_error "cannot read mirror payload: $src"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        key="${line%%=*}"; val="${line#*=}"
+        key="${key//[[:space:]]/}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        case "$key" in
+            IFACE) RP_IFACE="$val" ;;
+            LOCAL_PUBLIC_IP) RP_LOCAL_PUBLIC_IP="$val" ;;
+            REMOTE_PUBLIC_IP) RP_REMOTE_PUBLIC_IP="$val" ;;
+            LOCAL_PRIVATE_IP) RP_LOCAL_PRIVATE_IP="$val" ;;
+            REMOTE_PRIVATE_IP) RP_REMOTE_PRIVATE_IP="$val" ;;
+            MTU) RP_MTU="$val" ;;
+            MSS_MODE) RP_MSS_MODE="$val" ;;
+            SERVER_ADDR) RP_SERVER_ADDR="$val" ;;
+            CONTROL_PORT) RP_CONTROL_PORT="$val" ;;
+            PROTOCOL) RP_PROTOCOL="$val" ;;
+            TOKEN) RP_TOKEN="$val" ;;
+        esac
+    done < "$src"
+    if [[ -z "$RP_LOCAL_PUBLIC_IP" || -z "$RP_REMOTE_PUBLIC_IP" ]]; then
+        print_error "invalid payload: LOCAL_PUBLIC_IP / REMOTE_PUBLIC_IP missing."
+        return 1
+    fi
+    return 0
+}
+
+# reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS]
+reverse_iran_do() {
+    local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}"
+    if [[ ! -x /usr/local/bin/frps ]]; then
+        print_error "frps is not installed — run menu 1 (Install FRP) first."
+        return 1
+    fi
+    if ! is_ipv4 "$iran"; then print_error "Invalid Iran public IP: $iran"; return 1; fi
+    if ! is_ipv4 "$foreign"; then print_error "Invalid Foreign public IP: $foreign"; return 1; fi
+    if ! is_valid_port "$port"; then print_error "Invalid control port: $port"; return 1; fi
+    case "$proto" in
+        tcp|quic|kcp) ;;
+        *) print_error "Invalid protocol: $proto (want tcp|quic|kcp)"; return 1 ;;
+    esac
+    case "$mss" in
+        clamp|1360|1240|1220|off) ;;
+        *) print_error "Invalid MSS mode: $mss"; return 1 ;;
+    esac
+
+    print_info "Creating GRE gt11: Iran $iran ($iface 10.100.111.2/30) ↔ Foreign $foreign (10.100.111.1/30)"
+    gre_create_do "$iran" "$foreign" "$iface" "10.100.111.2/30" "10.100.111.1/30" 1400 "$mss" || return 1
+
+    local token cfg tmp
+    token=$(gen_token)
+    cfg="$SERVER_DIR/server-$port.toml"
+    tmp="$cfg.new"
+    mkdir -p "$SERVER_DIR"
+    if [[ -f "$cfg" ]]; then
+        print_warning "Overwriting existing $cfg (backup kept)"
+        cp -a "$cfg" "$cfg.bak-$(date +%Y%m%d-%H%M%S)"
+    fi
+    {
+        echo "# Generated by frp-suite (frp-manager CLI / frp-panel Web UI)"
+        echo "# FRP over GRE Reverse — Iran entry node (frps bound strictly to $iface)"
+        echo "bindAddr = \"10.100.111.2\""
+        echo "bindPort = $port"
+        if [[ "$proto" == "quic" ]]; then
+            echo "quicBindPort = $port"
+        elif [[ "$proto" == "kcp" ]]; then
+            echo "kcpBindPort = $port"
+        fi
+        echo
+        if [[ "$proto" == "quic" ]]; then
+            echo "transport.quic.keepalivePeriod = 10"
+            echo "transport.quic.maxIdleTimeout = 30"
+            echo "transport.quic.maxIncomingStreams = 100000"
+        else
+            echo "# transport.quic.keepalivePeriod = 10"
+            echo "# transport.quic.maxIdleTimeout = 30"
+            echo "# transport.quic.maxIncomingStreams = 100000"
+        fi
+        echo
+        echo "transport.heartbeatTimeout = 30"
+        echo "transport.maxPoolCount = 65535"
+        echo "transport.tcpMux = false"
+        echo "transport.tcpMuxKeepaliveInterval = 10"
+        echo "transport.tcpKeepalive = 30"
+        echo
+        echo "auth.method = \"token\""
+        echo "auth.token = \"$token\""
+    } > "$tmp"
+    chmod 600 "$tmp"
+    if ! /usr/local/bin/frps verify -c "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        print_error "frps rejected the generated config — aborting."
+        return 1
+    fi
+    mv "$tmp" "$cfg"
+
+    print_info "Starting frps@server-$port (bindAddr 10.100.111.2:$port)..."
+    systemctl enable --now "frps@server-$port" || print_warning "frps@server-$port failed to start."
+    sleep 1
+
+    if [[ "${REVERSE_NO_WATCHDOG:-0}" != "1" ]]; then
+        print_info "Enabling dual-layer auto-heal watchdog (15s / 3 / 60s)..."
+        NONINT=1 watchdog_enable 15 3 60 || print_warning "watchdog could not be enabled."
+    fi
+
+    echo
+    print_success "Iran entry node ready: frps listening only on 10.100.111.2:$port (invisible on the public internet)."
+    reverse_print_flow
+    echo
+    print_info "Mirror payload — paste this on the Foreign node:"
+    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.111.1/30" "10.100.111.2/30" 1400 "$mss" "10.100.111.2" "$port" "$proto" "$token"
+    echo
+    print_info "Or run this on the Foreign node (add the ports it should expose):"
+    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.111.1/30" "10.100.111.2/30" 1400 "$mss" "10.100.111.2" "$port" "$proto" "$token"
+    echo
+    print_warning "Token (the Foreign frpc must use the same): $token"
+}
+
+# reverse_foreign_do LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT TOKEN PORTS PROTOCOL PROTO_MODE [LOCALIP]
+reverse_foreign_do() {
+    local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7"
+    local server_addr="$8" port="$9" token="${10}" ports="${11}" protoname="${12}"
+    local proto_mode="${13:-both}" localip="${14:-127.0.0.1}"
+    if [[ ! -x /usr/local/bin/frpc ]]; then
+        print_error "frpc is not installed — run menu 1 (Install FRP) first."
+        return 1
+    fi
+    if ! is_ipv4 "$lp"; then print_error "Invalid Foreign public IP: $lp"; return 1; fi
+    if ! is_ipv4 "$rp"; then print_error "Invalid Iran public IP: $rp"; return 1; fi
+    if ! is_ipv4 "$server_addr"; then print_error "Invalid serverAddr: $server_addr"; return 1; fi
+    if ! is_valid_port "$port"; then print_error "Invalid control port: $port"; return 1; fi
+    if ! [[ "$token" =~ ^[A-Za-z0-9_.-]{8,128}$ ]]; then print_error "Invalid token (8..128 chars of [A-Za-z0-9_.-])."; return 1; fi
+    if ! is_ipv4 "$localip"; then print_error "Invalid local IP: $localip"; return 1; fi
+    case "$protoname" in
+        tcp|quic|kcp) ;;
+        *) print_error "Invalid protocol: $protoname (want tcp|quic|kcp)"; return 1 ;;
+    esac
+    case "$proto_mode" in
+        both|tcp|udp) ;;
+        *) print_error "Invalid proto mode: $proto_mode (want both|tcp|udp)"; return 1 ;;
+    esac
+    if ! expand_port_input "$ports"; then return 1; fi
+
+    print_info "Creating GRE gt11: Foreign $lp ($iface 10.100.111.1/30) ↔ Iran $rp (10.100.111.2/30)"
+    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" || return 1
+
+    local cfg tmp p web_port web_pass
+    cfg="$CLIENT_DIR/client-$port.toml"
+    tmp="$cfg.new"
+    web_port="$(allocate_web_port 7400 7499 "$CLIENT_DIR" 2>/dev/null || true)"
+    web_pass=""
+    [[ -n "$web_port" ]] && web_pass=$(gen_token)
+    mkdir -p "$CLIENT_DIR"
+    if [[ -f "$cfg" ]]; then
+        print_warning "Overwriting existing $cfg (backup kept)"
+        cp -a "$cfg" "$cfg.bak-$(date +%Y%m%d-%H%M%S)"
+    fi
+    {
+        echo "# Generated by frp-suite (frp-manager CLI / frp-panel Web UI)"
+        echo "# FRP over GRE Reverse — Foreign exit node (frpc dialing Iran over $iface)"
+        echo "serverAddr = \"$server_addr\""
+        echo "serverPort = $port"
+        echo
+        echo "loginFailExit = false"
+        echo
+        echo "auth.method = \"token\""
+        echo "auth.token = \"$token\""
+        echo
+        echo "transport.protocol = \"$protoname\""
+        echo "transport.tcpMux = false"
+        echo "transport.tcpMuxKeepaliveInterval = 10"
+        echo "transport.dialServerTimeout = 5"
+        echo "transport.dialServerKeepalive = 30"
+        echo "transport.poolCount = 30"
+        echo "transport.heartbeatInterval = 10"
+        echo "transport.heartbeatTimeout = 30"
+        echo "transport.tls.enable = true"
+        echo "transport.quic.keepalivePeriod = 10"
+        echo "transport.quic.maxIdleTimeout = 30"
+        echo "transport.quic.maxIncomingStreams = 100000"
+        if [[ -n "$web_port" ]]; then
+            echo
+            echo "webServer.addr = \"127.0.0.1\""
+            echo "webServer.port = $web_port"
+            echo "webServer.user = \"admin\""
+            echo "webServer.password = \"$web_pass\""
+        fi
+        for p in "${PORT_LIST[@]}"; do
+            if [[ "$proto_mode" == "both" || "$proto_mode" == "tcp" ]]; then
+                echo
+                echo "[[proxies]]"
+                echo "name = \"tcp-$p\""
+                echo "type = \"tcp\""
+                echo "localIP = \"$localip\""
+                echo "localPort = $p"
+                echo "remotePort = $p"
+                echo "transport.useEncryption = true"
+                echo "transport.useCompression = false"
+            fi
+            if [[ "$proto_mode" == "both" || "$proto_mode" == "udp" ]]; then
+                echo
+                echo "[[proxies]]"
+                echo "name = \"udp-$p\""
+                echo "type = \"udp\""
+                echo "localIP = \"$localip\""
+                echo "localPort = $p"
+                echo "remotePort = $p"
+                echo "transport.useEncryption = true"
+                echo "transport.useCompression = false"
+            fi
+        done
+    } > "$tmp"
+    chmod 600 "$tmp"
+    if ! /usr/local/bin/frpc verify -c "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        print_error "frpc rejected the generated config — aborting."
+        return 1
+    fi
+    mv "$tmp" "$cfg"
+
+    print_info "Starting frpc@client-$port (dialing $server_addr:$port over $iface)..."
+    systemctl enable --now "frpc@client-$port" || print_warning "frpc@client-$port failed to start."
+    sleep 1
+
+    if [[ "${REVERSE_NO_WATCHDOG:-0}" != "1" ]]; then
+        print_info "Enabling dual-layer auto-heal watchdog (15s / 3 / 60s)..."
+        NONINT=1 watchdog_enable 15 3 60 || print_warning "watchdog could not be enabled."
+    fi
+
+    echo
+    print_success "Foreign exit node ready: frpc@client-$port exposes ${EXPANDED_COUNT} local port(s) on the Iran entry node."
+    reverse_print_flow
+    echo
+    print_info "Quick link test:"
+    local peer avg
+    peer="10.100.111.2"
+    if ping -c3 -W2 -I "$iface" "$peer" >/dev/null 2>&1; then
+        avg=$(ping -c3 -W2 -I "$iface" "$peer" 2>/dev/null | awk -F'/' '/=/{print $5; exit}')
+        print_success "GRE peer $peer reachable via $iface (avg ${avg:-?} ms)."
+    else
+        print_warning "GRE peer $peer is not answering yet — check protocol 47 and the Iran entry node."
+    fi
+    if systemctl is-active --quiet "frpc@client-$port"; then
+        print_success "frpc@client-$port is active."
+    else
+        print_warning "frpc@client-$port is not active. Last log lines:"
+        journalctl -u "frpc@client-$port" --no-pager -n 20 2>/dev/null || true
+    fi
+}
+
+reverse_iran_prompt() {
+    local def_pub iran foreign iface port proto_choice proto mss
+    def_pub=$(detect_public_ip)
+    read -p "Iran public IP${def_pub:+ [$def_pub]}: " iran
+    iran=${iran:-$def_pub}
+    read -p "Foreign public IP: " foreign
+    read -p "GRE interface [gt11]: " iface
+    iface=${iface:-gt11}
+    read -p "Tunnel control port [7025]: " port
+    port=${port:-7025}
+    echo "FRP protocol:"
+    echo "  1) tcp  (plain — recommended over GRE)"
+    echo "  2) quic"
+    echo "  3) kcp"
+    read -p "Choice [1]: " proto_choice
+    case "$proto_choice" in 2) proto="quic" ;; 3) proto="kcp" ;; *) proto="tcp" ;; esac
+    mss="1220"
+    reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss"
+}
+
+reverse_foreign_prompt() {
+    local def_pub lp rp port token protoname proto_mode ports localip payload_choice payload_file
+    local iface lpriv rpriv mtu mss server_addr
+    echo "Do you have a mirror payload from the Iran node?"
+    echo "  1) Yes — read it from a file"
+    echo "  2) No — enter the values manually"
+    read -p "Choice [2]: " payload_choice
+    if [[ "$payload_choice" == "1" ]]; then
+        read -p "Path to the payload file: " payload_file
+        reverse_parse_payload "$payload_file" || return 1
+        lp="$RP_LOCAL_PUBLIC_IP"; rp="$RP_REMOTE_PUBLIC_IP"
+        iface="${RP_IFACE:-gt11}"; lpriv="${RP_LOCAL_PRIVATE_IP:-10.100.111.1/30}"
+        rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"; mtu="${RP_MTU:-1400}"
+        mss="${RP_MSS_MODE:-1220}"; server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
+        port="${RP_CONTROL_PORT:-7025}"; token="$RP_TOKEN"; protoname="${RP_PROTOCOL:-tcp}"
+    else
+        def_pub=$(detect_public_ip)
+        read -p "Foreign public IP${def_pub:+ [$def_pub]}: " lp
+        lp=${lp:-$def_pub}
+        read -p "Iran public IP: " rp
+        iface="gt11"; lpriv="10.100.111.1/30"; rpriv="10.100.111.2/30"
+        mtu="1400"; mss="1220"; server_addr="10.100.111.2"
+        read -p "Tunnel control port [7025]: " port
+        port=${port:-7025}
+        read -p "Auth token (from the Iran node): " token
+        echo "FRP protocol: 1) tcp  2) quic  3) kcp"
+        read -p "Choice [1]: " proto_choice
+        case "$proto_choice" in 2) protoname="quic" ;; 3) protoname="kcp" ;; *) protoname="tcp" ;; esac
+    fi
+    read -p "Local ports to expose (e.g. 8443,2053,443): " ports
+    echo "Emit per port: 1) TCP + UDP  2) TCP only  3) UDP only"
+    read -p "Choice [1]: " proto_choice
+    case "$proto_choice" in 2) proto_mode="tcp" ;; 3) proto_mode="udp" ;; *) proto_mode="both" ;; esac
+    read -p "Local IP on this node [127.0.0.1]: " localip
+    localip=${localip:-127.0.0.1}
+    reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
+        "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip"
+}
+
+reverse_menu() {
+    while true; do
+        clear
+        print_header
+        echo "FRP over GRE Reverse — Quick Setup"
+        echo "----------------------------------"
+        echo
+        reverse_print_flow
+        echo
+        echo "Iran is the entry bridge (frps on 10.100.111.2); Foreign is the exit"
+        echo "backend (frpc on 10.100.111.1). Configure Iran first, then Foreign."
+        echo
+        echo "1) Iran node — entry / frps"
+        echo "2) Foreign node — exit / frpc"
+        echo "3) Back to Main Menu"
+        echo
+        read -p "Choose an option [1-3]: " rev_choice
+        echo
+        case "$rev_choice" in
+            1) reverse_iran_prompt; pause ;;
+            2) reverse_foreign_prompt; pause ;;
+            3) return ;;
+            *) print_error "Invalid option. Please choose 1-3."; pause ;;
+        esac
+    done
+}
+
+reverse_cli() {
+    local action="${1:-}"
+    shift || true
+    case "$action" in
+        iran)
+            local iran="" foreign="" iface="gt11" port="7025" proto="tcp" mss="1220"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --iran-public) iran="$2"; shift 2 ;;
+                    --foreign-public) foreign="$2"; shift 2 ;;
+                    --iface) iface="$2"; shift 2 ;;
+                    --port|--control-port) port="$2"; shift 2 ;;
+                    --protocol) proto="$2"; shift 2 ;;
+                    --mss) mss="$2"; shift 2 ;;
+                    --no-watchdog) REVERSE_NO_WATCHDOG=1; shift ;;
+                    *) print_error "unknown flag: $1"; exit 1 ;;
+                esac
+            done
+            reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss"
+            ;;
+        foreign)
+            local payload="" lp="" rp="" iface="" lpriv="" rpriv="" mtu="" mss=""
+            local server_addr="" port="" token="" ports="" protoname="" proto_mode="both" localip="127.0.0.1"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --payload) payload="$2"; shift 2 ;;
+                    --local-public) lp="$2"; shift 2 ;;
+                    --remote-public) rp="$2"; shift 2 ;;
+                    --iface) iface="$2"; shift 2 ;;
+                    --local-private) lpriv="$2"; shift 2 ;;
+                    --remote-private) rpriv="$2"; shift 2 ;;
+                    --mtu) mtu="$2"; shift 2 ;;
+                    --mss) mss="$2"; shift 2 ;;
+                    --server-addr) server_addr="$2"; shift 2 ;;
+                    --control-port|--port) port="$2"; shift 2 ;;
+                    --token) token="$2"; shift 2 ;;
+                    --ports) ports="$2"; shift 2 ;;
+                    --protocol) protoname="$2"; shift 2 ;;
+                    --proto) proto_mode="$2"; shift 2 ;;
+                    --local-ip) localip="$2"; shift 2 ;;
+                    --no-watchdog) REVERSE_NO_WATCHDOG=1; shift ;;
+                    *) print_error "unknown flag: $1"; exit 1 ;;
+                esac
+            done
+            if [[ -n "$payload" ]]; then
+                reverse_parse_payload "$payload" || exit 1
+                [[ -z "$lp" ]] && lp="$RP_LOCAL_PUBLIC_IP"
+                [[ -z "$rp" ]] && rp="$RP_REMOTE_PUBLIC_IP"
+                [[ -z "$iface" ]] && iface="${RP_IFACE:-gt11}"
+                [[ -z "$lpriv" ]] && lpriv="${RP_LOCAL_PRIVATE_IP:-10.100.111.1/30}"
+                [[ -z "$rpriv" ]] && rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"
+                [[ -z "$mtu" ]] && mtu="${RP_MTU:-1400}"
+                [[ -z "$mss" ]] && mss="${RP_MSS_MODE:-1220}"
+                [[ -z "$server_addr" ]] && server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
+                [[ -z "$port" ]] && port="${RP_CONTROL_PORT:-7025}"
+                [[ -z "$token" ]] && token="$RP_TOKEN"
+                [[ -z "$protoname" ]] && protoname="${RP_PROTOCOL:-tcp}"
+            fi
+            [[ -z "$iface" ]] && iface="gt11"
+            [[ -z "$lpriv" ]] && lpriv="10.100.111.1/30"
+            [[ -z "$rpriv" ]] && rpriv="10.100.111.2/30"
+            [[ -z "$mtu" ]] && mtu="1400"
+            [[ -z "$mss" ]] && mss="1220"
+            [[ -z "$server_addr" ]] && server_addr="10.100.111.2"
+            [[ -z "$port" ]] && port="7025"
+            [[ -z "$protoname" ]] && protoname="tcp"
+            if [[ -z "$ports" ]]; then
+                print_error "usage: frp-manager reverse foreign ... --ports 8443,2053,443"
+                exit 1
+            fi
+            reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
+                "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip"
+            ;;
+        *)
+            print_error "usage: frp-manager reverse iran|foreign ..."
+            exit 1
+            ;;
+    esac
+}
+
 # --- Web Panel manager ------------------------------------------------------------
 
 panel_menu() {
@@ -2197,7 +2822,7 @@ watchdog_menu() {
     while true; do
         clear
         print_header
-        echo "Watchdog & Health Monitor"
+        echo "Dual-Layer Watchdog & Health Monitor"
         echo "-------------------------"
         echo
         echo "1) Enable watchdog (auto-heal GRE + frpc)"
@@ -2212,7 +2837,7 @@ watchdog_menu() {
         echo
 
         case $wd_choice in
-            1) watchdog_enable 60 3 120; pause ;;
+            1) watchdog_enable 15 3 60; pause ;;
             2) watchdog_disable; pause ;;
             3) watchdog_status; pause ;;
             4) tail -n 30 "$PANEL_LOG_DIR/watchdog.log" 2>/dev/null || print_warning "No watchdog log yet."; pause ;;
@@ -2224,14 +2849,14 @@ watchdog_menu() {
 }
 
 watchdog_enable() { # interval threshold cooldown
-    local interval="${1:-60}" threshold="${2:-3}" cooldown="${3:-120}"
+    local interval="${1:-15}" threshold="${2:-3}" cooldown="${3:-60}"
     if [[ "${NONINT:-}" != "1" ]]; then
-        read -p "Probe interval in seconds [60]: " interval
-        interval=${interval:-60}
+        read -p "Probe interval in seconds [15]: " interval
+        interval=${interval:-15}
         read -p "Failures before restart [3]: " threshold
         threshold=${threshold:-3}
-        read -p "Restart cooldown in seconds [120]: " cooldown
-        cooldown=${cooldown:-120}
+        read -p "Restart cooldown in seconds [60]: " cooldown
+        cooldown=${cooldown:-60}
     fi
     if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 10 )); then
         print_error "Interval must be >= 10 seconds."; return 1
@@ -2254,6 +2879,7 @@ PING_TIMEOUT=2
 TCP_TIMEOUT=3
 EOF
     systemctl enable --now frp-watchdog
+    systemctl restart frp-watchdog 2>/dev/null || true
     print_success "Watchdog enabled (interval=${interval}s threshold=$threshold cooldown=${cooldown}s)."
 }
 
@@ -2266,7 +2892,7 @@ watchdog_status() {
     if systemctl is-active --quiet frp-watchdog 2>/dev/null; then
         print_success "frp-watchdog.service: active"
         if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
-            grep -E '^(INTERVAL|THRESHOLD|COOLDOWN)' "$PANEL_CONF_DIR/watchdog.env" | sed 's/^/  /'
+            grep -E '^(INTERVAL|THRESHOLD|COOLDOWN|PING_TIMEOUT|TCP_TIMEOUT)' "$PANEL_CONF_DIR/watchdog.env" | sed 's/^/  /'
         fi
     else
         print_warning "frp-watchdog.service: inactive"
@@ -2373,9 +2999,10 @@ main_menu() {
         echo "11) Web Panel"
         echo "12) Backup / Restore"
         echo "13) Watchdog & Health"
+        echo "14) FRP over GRE Reverse (Quick Setup)"
         echo
 
-        read -p "Choose an option [1-13]: " choice
+        read -p "Choose an option [1-14]: " choice
         echo
 
         case $choice in
@@ -2426,8 +3053,11 @@ main_menu() {
             13)
                 watchdog_menu
                 ;;
+            14)
+                reverse_menu
+                ;;
             *)
-                print_error "Invalid option. Please choose 1-13."
+                print_error "Invalid option. Please choose 1-14."
                 pause
                 ;;
         esac
@@ -2451,6 +3081,14 @@ Subcommands (non-interactive):
                           [--mss clamp|1360|1240|1220|off]
   frp-manager gre delete <name>
   frp-manager gre mirror <name>
+  frp-manager reverse iran --iran-public IP --foreign-public IP
+                           [--iface gt11] [--control-port 7025]
+                           [--protocol tcp|quic|kcp] [--mss 1220] [--no-watchdog]
+  frp-manager reverse foreign --payload FILE|- --ports 8443,2053,443
+                           [--proto both|tcp|udp] [--local-ip 127.0.0.1] [--no-watchdog]
+  frp-manager reverse foreign --local-public IP --remote-public IP
+                           --control-port 7025 --token TOKEN
+                           --ports 8443,2053,443 [--protocol tcp] [--no-watchdog]
   frp-manager panel install [--file <tar.gz>] [--port N]
   frp-manager panel start|stop|restart|status
   frp-manager panel port <N>
@@ -2460,7 +3098,7 @@ Subcommands (non-interactive):
   frp-manager turbo zram-off|zram-status
   frp-manager backup export [path]
   frp-manager backup import <path>
-  frp-manager watchdog enable [--interval 60] [--threshold 3] [--cooldown 120]
+  frp-manager watchdog enable [--interval 15] [--threshold 3] [--cooldown 60]
   frp-manager watchdog disable|status
   frp-manager health
   frp-manager status
@@ -2478,6 +3116,7 @@ cli_dispatch() {
     shift || true
     case "$cmd" in
         gre) gre_cli "$@" ;;
+        reverse|wizard) reverse_cli "$@" ;;
         panel) panel_cli "$@" ;;
         turbo) turbo_cli "$@" ;;
         backup) backup_cli "$@" ;;
@@ -2630,7 +3269,7 @@ watchdog_cli() {
     shift || true
     case "$action" in
         enable)
-            local interval="60" threshold="3" cooldown="120"
+            local interval="15" threshold="3" cooldown="60"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --interval) interval="$2"; shift 2 ;;

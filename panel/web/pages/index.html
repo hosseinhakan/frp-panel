@@ -110,6 +110,25 @@
               </div>
             </div>
 
+            <div class="card mb1">
+              <div class="card-head">
+                <h2>FRP over GRE Reverse — Quick Setup</h2>
+                <div class="grow"></div>
+                <span class="pill accent">one wizard · GRE + FRP</span>
+              </div>
+              <p class="muted small mb05">
+                Iran is the <strong>entry bridge</strong>: <span class="mono">frps</span> listens only on
+                <span class="mono">10.100.111.2</span> (gt11) and users connect to the Iran public IP.
+                Foreign is the <strong>exit backend</strong>: <span class="mono">frpc</span> dials back over GRE
+                and exposes its local ports.
+              </p>
+              <pre class="logpane">User ──► Iran Public IP:port ──► frps (Iran, 10.100.111.2) ──► GRE gt11 ──► frpc (Foreign, 10.100.111.1) ──► Foreign 127.0.0.1:port</pre>
+              <div class="row mt05">
+                <button class="btn primary" @click="openRevWizard()">Start quick setup</button>
+                <span class="faint small">Creates gt11, the frps/frpc instance, a 32-char token and the mirror payload.</span>
+              </div>
+            </div>
+
             <div class="grid grid-2">
               <!-- live latency -->
               <div class="card">
@@ -188,6 +207,274 @@
                 </div>
               </div>
             </div>
+            <!-- FRP over GRE Reverse quick-setup wizard -->
+            <template x-if="rev">
+              <div class="modal-back" @keydown.escape.window="rev = null">
+                <div class="modal">
+                  <div class="modal-head">
+                    <h2>FRP over GRE Reverse — Quick Setup</h2>
+                    <div class="grow"></div>
+                    <span class="pill idle" x-text="rev.step === 'role' ? 'step 1 · role' : (rev.step === 'form' ? 'step 2 · ' + rev.role : 'step 3 · done')"></span>
+                  </div>
+
+                  <!-- step 1: role -->
+                  <template x-if="rev.step === 'role'">
+                    <div>
+                      <p class="muted small mb05">
+                        Configure the <strong>Iran entry node first</strong>: it prints the mirror payload.
+                        Then run this wizard on the Foreign node and paste that payload.
+                      </p>
+                      <div class="grid grid-2">
+                        <div class="card rolecard" role="button" tabindex="0"
+                             @click="revPickRole('iran')"
+                             @keydown.enter.prevent="revPickRole('iran')"
+                             @keydown.space.prevent="revPickRole('iran')">
+                          <div class="row">
+                            <span class="badge srv">frps</span>
+                            <div class="grow"></div>
+                            <span class="pill accent">entry · bridge</span>
+                          </div>
+                          <h3 class="mt05">Iran Node</h3>
+                          <p class="muted small">
+                            gt11 <span class="mono">10.100.111.2/30</span> · frps bound to
+                            <span class="mono">10.100.111.2:7025</span>. Users connect to the
+                            <strong>Iran public IP</strong>.
+                          </p>
+                        </div>
+                        <div class="card rolecard" role="button" tabindex="0"
+                             @click="revPickRole('foreign')"
+                             @keydown.enter.prevent="revPickRole('foreign')"
+                             @keydown.space.prevent="revPickRole('foreign')">
+                          <div class="row">
+                            <span class="badge cli">frpc</span>
+                            <div class="grow"></div>
+                            <span class="pill accent">exit · backend</span>
+                          </div>
+                          <h3 class="mt05">Foreign Node</h3>
+                          <p class="muted small">
+                            gt11 <span class="mono">10.100.111.1/30</span> · frpc dials back to
+                            <span class="mono">10.100.111.2:7025</span> and exposes its
+                            <span class="mono">127.0.0.1</span> ports.
+                          </p>
+                        </div>
+                      </div>
+                      <div class="row mt1">
+                        <label class="check">
+                          <input type="checkbox" x-model="rev.enableWatchdog">
+                          Enable the dual-layer auto-heal watchdog (15s · threshold 3 · 60s cooldown)
+                        </label>
+                      </div>
+                      <p class="faint small mt05">
+                        Layer 1 rebuilds dead GRE links and reconnects frpc; layer 2 restarts a frozen
+                        frpc session when GRE is healthy but the control channel or proxies stall.
+                      </p>
+                      <div class="modal-foot">
+                        <button type="button" class="btn ghost" @click="rev = null">Cancel</button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- step 2: Iran entry form -->
+                  <template x-if="rev.step === 'form' && rev.role === 'iran'">
+                    <div>
+                      <div class="field-row">
+                        <div class="field">
+                          <label>Iran public IP (this node)</label>
+                          <input class="input mono" x-model="rev.iranPublicIp" placeholder="1.2.3.4">
+                        </div>
+                        <div class="field">
+                          <label>Foreign public IP (exit node)</label>
+                          <input class="input mono" x-model="rev.foreignPublicIp" placeholder="5.6.7.8">
+                        </div>
+                      </div>
+                      <div class="field-row mt05">
+                        <div class="field">
+                          <label>GRE interface</label>
+                          <input class="input mono" x-model="rev.iface" placeholder="gt11">
+                        </div>
+                        <div class="field">
+                          <label>Tunnel control port</label>
+                          <input class="input mono" type="number" min="1" max="65535" x-model.number="rev.controlPort">
+                        </div>
+                        <div class="field">
+                          <label>Protocol</label>
+                          <select class="select" x-model="rev.protocol">
+                            <option value="tcp">tcp (plain, recommended over GRE)</option>
+                            <option value="quic">quic</option>
+                            <option value="kcp">kcp</option>
+                          </select>
+                        </div>
+                      </div>
+                      <p class="faint small mt05">
+                        Creates gt11 (<span class="mono">10.100.111.2/30 ↔ 10.100.111.1/30</span>, MTU 1400,
+                        NOTRACK proto 47, TCPMSS clamp 1240/1220), generates a 32-char token, and binds frps
+                        strictly to the tunnel IP so it is invisible on the public internet.
+                      </p>
+                      <template x-if="rev.error"><div class="notice bad mt05"><span x-text="rev.error"></span></div></template>
+                      <div class="modal-foot">
+                        <button type="button" class="btn ghost" @click="rev.step = 'role'">Back</button>
+                        <button type="button" class="btn primary" :disabled="rev.busy" @click="revRun()">Create entry node</button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- step 2: Foreign exit form -->
+                  <template x-if="rev.step === 'form' && rev.role === 'foreign'">
+                    <div>
+                      <div class="field">
+                        <label>Mirror payload from the Iran node</label>
+                        <textarea class="input rawedit" x-model="rev.mirrorPayload" spellcheck="false"
+                                  placeholder="Paste the IFACE=… TOKEN=… block here"></textarea>
+                        <span class="hint">Paste the payload, or leave it empty and fill the fields below.</span>
+                      </div>
+                      <div class="field-row mt05">
+                        <div class="field">
+                          <label>Foreign public IP (this node)</label>
+                          <input class="input mono" x-model="rev.foreignPublicIp" placeholder="from payload / 5.6.7.8">
+                        </div>
+                        <div class="field">
+                          <label>Iran public IP</label>
+                          <input class="input mono" x-model="rev.iranPublicIp" placeholder="from payload / 1.2.3.4">
+                        </div>
+                        <div class="field">
+                          <label>Control port</label>
+                          <input class="input mono" type="number" min="1" max="65535" x-model.number="rev.controlPort" placeholder="7025">
+                        </div>
+                      </div>
+                      <div class="field-row mt05">
+                        <div class="field">
+                          <label>Token</label>
+                          <input class="input mono" x-model="rev.token" spellcheck="false" placeholder="from payload">
+                        </div>
+                        <div class="field">
+                          <label>Protocol</label>
+                          <select class="select" x-model="rev.protocol">
+                            <option value="">from payload / tcp</option>
+                            <option value="tcp">tcp</option>
+                            <option value="quic">quic</option>
+                            <option value="kcp">kcp</option>
+                          </select>
+                        </div>
+                        <div class="field">
+                          <label>GRE interface</label>
+                          <input class="input mono" x-model="rev.iface" placeholder="from payload / gt11">
+                        </div>
+                      </div>
+                      <div class="field-row mt05">
+                        <div class="field">
+                          <label>Local ports to expose</label>
+                          <input class="input mono" x-model="rev.localPorts" placeholder="8443,2053,443">
+                        </div>
+                        <div class="field">
+                          <label>Emit</label>
+                          <select class="select" x-model="rev.proto">
+                            <option value="both">TCP + UDP — paired rules per port</option>
+                            <option value="tcp">TCP only</option>
+                            <option value="udp">UDP only</option>
+                          </select>
+                        </div>
+                        <div class="field">
+                          <label>Local IP on this node</label>
+                          <input class="input mono" x-model="rev.localIp" placeholder="127.0.0.1">
+                        </div>
+                      </div>
+                      <p class="faint small mt05">
+                        Creates the matching gt11 (<span class="mono">10.100.111.1/30 ↔ 10.100.111.2/30</span>)
+                        and an frpc instance with TLS + per-proxy encryption, compression off, then pings
+                        <span class="mono">10.100.111.2</span> and checks the frpc unit.
+                      </p>
+                      <template x-if="rev.error"><div class="notice bad mt05"><span x-text="rev.error"></span></div></template>
+                      <div class="modal-foot">
+                        <button type="button" class="btn ghost" @click="rev.step = 'role'">Back</button>
+                        <button type="button" class="btn primary" :disabled="rev.busy" @click="revRun()">Create exit node + test link</button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- step 3: result -->
+                  <template x-if="rev.step === 'result'">
+                    <div>
+                      <template x-if="rev.role === 'iran'">
+                        <div>
+                          <div class="row mb05">
+                            <span class="pill ok"><span class="dot"></span>entry node configured</span>
+                            <span class="pill idle mono" x-text="'frps@' + rev.result.server.name + ' · ' + rev.result.server.bindAddr + ':' + rev.result.server.bindPort"></span>
+                            <span class="pill" :class="rev.result.watchdog && rev.result.watchdog.enabled ? 'ok' : 'idle'"
+                                  x-text="rev.result.watchdog && rev.result.watchdog.enabled ? 'watchdog on' : 'watchdog off'"></span>
+                            <span class="pill idle mono" x-text="'verification: ' + rev.result.verify"></span>
+                          </div>
+                          <dl class="kv">
+                            <dt>tunnel</dt><dd class="mono" x-text="rev.result.tunnel.iface + ' · ' + rev.result.tunnel.local_private_ip + ' ↔ ' + rev.result.tunnel.remote_private_ip"></dd>
+                            <dt>token</dt><dd class="mono" x-text="rev.result.server.token"></dd>
+                          </dl>
+                          <template x-if="rev.result.unit_error || rev.result.tunnel_unit_error">
+                            <div class="notice warn mt05">
+                              <span x-text="'unit start failed: ' + (rev.result.unit_error || rev.result.tunnel_unit_error)"></span>
+                            </div>
+                          </template>
+                          <p class="navgroup-label mt1">mirror payload — paste on the Foreign node</p>
+                          <pre class="logpane" x-text="rev.result.mirror_payload"></pre>
+                          <div class="btn-row mt05">
+                            <button class="btn" @click="revCopy(rev.result.mirror_payload)">copy payload</button>
+                          </div>
+                          <p class="navgroup-label mt1">CLI command — edit the ports on the Foreign node</p>
+                          <pre class="logpane" x-text="rev.result.mirror_command"></pre>
+                          <div class="btn-row mt05">
+                            <button class="btn" @click="revCopy(rev.result.mirror_command)">copy command</button>
+                          </div>
+                          <p class="faint small mt05">
+                            Next: run this wizard on the Foreign node, choose <strong>Foreign Node</strong>,
+                            paste the payload, add the local ports, and run the link test.
+                          </p>
+                        </div>
+                      </template>
+                      <template x-if="rev.role === 'foreign'">
+                        <div>
+                          <div class="row mb05">
+                            <span class="pill" :class="rev.result.link_test.ok ? 'ok' : 'warn'">
+                              <span class="dot"></span>
+                              <span x-text="rev.result.link_test.ok ? 'GRE + FRPC healthy' : 'created — link check needs attention'"></span>
+                            </span>
+                            <span class="pill" :class="rev.result.link_test.reachable ? 'ok' : 'bad'" x-text="rev.result.link_test.reachable ? 'peer reachable' : 'peer unreachable'"></span>
+                            <span class="pill" :class="rev.result.link_test.frpc_active ? 'ok' : 'bad'" x-text="rev.result.link_test.frpc_unit + ' ' + (rev.result.link_test.frpc_active ? 'active' : 'inactive')"></span>
+                            <span class="pill" :class="rev.result.watchdog && rev.result.watchdog.enabled ? 'ok' : 'idle'"
+                                  x-text="rev.result.watchdog && rev.result.watchdog.enabled ? 'watchdog on' : 'watchdog off'"></span>
+                            <template x-if="rev.result.link_test.rtt_ms !== undefined">
+                              <span class="pill accent" x-text="'avg ' + FRP.fmtRtt(rev.result.link_test.rtt_ms)"></span>
+                            </template>
+                            <template x-if="rev.result.link_test.loss_pct !== undefined">
+                              <span class="pill" :class="rev.result.link_test.loss_pct > 0 ? 'warn' : 'ok'" x-text="rev.result.link_test.loss_pct + '% loss'"></span>
+                            </template>
+                          </div>
+                          <dl class="kv">
+                            <dt>tunnel</dt><dd class="mono" x-text="rev.result.tunnel.iface + ' · ' + rev.result.tunnel.local_private_ip + ' ↔ ' + rev.result.tunnel.remote_private_ip"></dd>
+                            <dt>frpc</dt><dd class="mono" x-text="'frpc@' + rev.result.client.name + ' → ' + rev.result.client.serverAddr + ':' + rev.result.client.serverPort"></dd>
+                            <dt>proxies</dt><dd x-text="rev.result.client.proxies + ' rules · tls ' + (rev.result.client.tls ? 'on' : 'off')"></dd>
+                          </dl>
+                          <template x-if="rev.result.unit_error || rev.result.tunnel_unit_error">
+                            <div class="notice warn mt05">
+                              <span x-text="'unit start failed: ' + (rev.result.unit_error || rev.result.tunnel_unit_error)"></span>
+                            </div>
+                          </template>
+                          <template x-if="rev.result.link_test.output">
+                            <pre class="logpane mt05" x-text="rev.result.link_test.output"></pre>
+                          </template>
+                          <p class="faint small mt05">
+                            Users now reach each exposed Foreign service at
+                            <span class="mono">Iran Public IP:&lt;forwarded port&gt;</span> — the same port number
+                            that was forwarded (for example <span class="mono">1.2.3.4:443</span>).
+                          </p>
+                        </div>
+                      </template>
+                      <div class="modal-foot">
+                        <button type="button" class="btn ghost" @click="rev = null">Close</button>
+                        <button type="button" class="btn" @click="revPickRole(rev.role)">Run again</button>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
           </section>
         </template>
 
@@ -294,6 +581,7 @@
                         <option :value="c.v" x-text="c.label"></option>
                       </template>
                     </select>
+                    <span class="hint">Iran entry node: bind frps to the GRE IP (e.g. 10.100.111.2) so the control port is reachable only over gt11.</span>
                   </div>
                   <template x-if="wiz.bindAddr === 'custom'">
                     <div class="field mt05">
@@ -356,6 +644,7 @@
                         <option :value="c.v" x-text="c.label"></option>
                       </template>
                     </select>
+                    <span class="hint">Iran entry node: the GRE IP (10.100.111.2) keeps frps off the public internet.</span>
                   </div>
                   <template x-if="edit.bindAddr === 'custom'">
                     <div class="field mt05">
@@ -578,6 +867,7 @@
                     <div class="field">
                       <label>Server address</label>
                       <input class="input mono" x-model="wiz.serverAddr" placeholder="10.100.111.2 or public IP">
+                      <span class="hint">Foreign exit node: use the Iran tunnel IP (10.100.111.2) so frpc dials back over gt11.</span>
                     </div>
                     <div class="field">
                       <label>Server port</label>
@@ -708,7 +998,7 @@
             <div class="viewhead">
               <div>
                 <h1>GRE Tunnels</h1>
-                <p>Kernel GRE links in <span class="mono">/root/frp/gre/*.env</span>, run as <span class="mono">gre-tunnel@&lt;name&gt;</span> — proto&nbsp;47, conntrack bypass, MSS clamped.</p>
+                <p>Kernel GRE links in <span class="mono">/root/frp/gre/*.env</span>, run as <span class="mono">gre-tunnel@&lt;name&gt;</span> — proto&nbsp;47, conntrack bypass, MSS clamped. In the reverse topology the Iran entry node is <span class="mono">10.100.111.2</span> and the Foreign exit node is <span class="mono">10.100.111.1</span>; use the Dashboard quick setup to create both sides at once.</p>
               </div>
               <div class="grow"></div>
               <button class="btn primary" @click="openCreate()">+ New tunnel</button>
@@ -1251,7 +1541,7 @@
             <div class="viewhead">
               <div>
                 <h1>Watchdog</h1>
-                <p>Auto-heal loop: GRE peer pings and frpc control probes restart failed units after N strikes.</p>
+                <p>Dual-layer auto-heal: GRE peer probes (layer 1) plus FRP control-channel and proxy health (layer 2). Defaults: 15s interval, 3 strikes, 60s cooldown.</p>
               </div>
             </div>
 

@@ -1,15 +1,22 @@
 [Unit]
 Description=GRE tunnel %i (FRP Tunnel Suite)
 Documentation=file:///root/frp/gre/%i.env
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/frp-gre up %i
-ExecStop=/usr/local/bin/frp-gre down %i
+Type=simple
+ExecStartPre=/usr/local/bin/frp-gre up %i
+ExecStart=/usr/local/bin/frp-gre hold %i
 ExecReload=/usr/local/bin/frp-gre reload %i
+ExecStop=/usr/local/bin/frp-gre down %i
+Restart=always
+RestartSec=2s
+Nice=-10
+OOMScoreAdjust=-900
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target

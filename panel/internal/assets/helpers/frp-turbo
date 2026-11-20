@@ -1,7 +1,9 @@
 #!/bin/bash
 # frp-turbo — persistent kernel/network tuning for the FRP Tunnel Suite.
-# Applies BBR + fq + high-throughput sysctls via a sysctl drop-in, ensures the
-# frp GC cron, and manages optional ZRAM (lz4) + swappiness tuning.
+# Applies BBR + fq + high-throughput / high-stability sysctls via a sysctl
+# drop-in, ensures the frp GC cron, and manages optional ZRAM (lz4) +
+# swappiness tuning. Conntrack tuning is applied only when conntrack is
+# actually loaded, so the script never fails on hosts without it.
 # Canonical copy: panel/internal/assets/helpers/frp-turbo (also embedded in frp-panel).
 #
 # Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status
@@ -31,10 +33,23 @@ net.ipv4.tcp_rmem = 4096 87380 33554432
 net.ipv4.tcp_wmem = 4096 65536 33554432
 net.core.somaxconn = 65535
 net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_tw_reuse = 1
 TURBO_SYSCTL
+
+    # Only add the conntrack key when the table is actually available. Writing
+    # an unknown key into the drop-in would make every later `sysctl --system`
+    # fail on hosts that do not load nf_conntrack.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        echo "net.netfilter.nf_conntrack_max = 1048576" >> "$SYSCTL_DROPIN"
+    fi
 }
 
 ensure_gc_cron() {
@@ -47,20 +62,22 @@ cmd_apply() {
     write_dropin
     echo "tcp_bbr" > "$BBR_MODULE_FILE"
     modprobe tcp_bbr 2>/dev/null || true
-    sysctl --system >/dev/null
+    if ! sysctl --system >/dev/null; then
+        echo "frp-turbo: warning: some sysctls could not be applied (kernel may not support them)" >&2
+    fi
     ensure_gc_cron
-    echo "frp-turbo: applied BBR + fq + tunnel sysctls ($SYSCTL_DROPIN); GC cron ensured"
+    echo "frp-turbo: applied BBR + fq + stability sysctls ($SYSCTL_DROPIN); GC cron ensured"
     cmd_status
 }
 
 cmd_revert() {
     rm -f "$SYSCTL_DROPIN"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: removed $SYSCTL_DROPIN (kernel keeps current values until reboot)"
 }
 
 cmd_status() {
-    local q cc bmss rmax wmax somax fwd dropin
+    local q cc bmss rmax wmax somax fwd ka ki kp reuse ct dropin
     q="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
     cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
     bmss="$(sysctl -n net.ipv4.tcp_base_mss 2>/dev/null || echo '?')"
@@ -68,9 +85,14 @@ cmd_status() {
     wmax="$(sysctl -n net.core.wmem_max 2>/dev/null || echo '?')"
     somax="$(sysctl -n net.core.somaxconn 2>/dev/null || echo '?')"
     fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+    ka="$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo '?')"
+    ki="$(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo '?')"
+    kp="$(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo '?')"
+    reuse="$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null || echo '?')"
+    ct="$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 'n/a')"
     [[ -f "$SYSCTL_DROPIN" ]] && dropin="installed" || dropin="missing"
-    printf 'frp-turbo: qdisc=%s cc=%s tcp_base_mss=%s rmem_max=%s wmem_max=%s somaxconn=%s ip_forward=%s dropin=%s\n' \
-        "$q" "$cc" "$bmss" "$rmax" "$wmax" "$somax" "$fwd" "$dropin"
+    printf 'frp-turbo: qdisc=%s cc=%s tcp_base_mss=%s rmem_max=%s wmem_max=%s somaxconn=%s ip_forward=%s tcp_keepalive=%s/%s/%s tcp_tw_reuse=%s nf_conntrack_max=%s dropin=%s\n' \
+        "$q" "$cc" "$bmss" "$rmax" "$wmax" "$somax" "$fwd" "$ka" "$ki" "$kp" "$reuse" "$ct" "$dropin"
 }
 
 cmd_zram_on() {
@@ -97,7 +119,7 @@ cmd_zram_on() {
     mkswap /dev/zram0 >/dev/null
     swapon -p 100 /dev/zram0
     printf 'vm.swappiness = 10\n' > "$ZRAM_SYSCTL"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: zram0 swap on — ${ZRAM_SIZE_MB}MB ${ZRAM_ALGO}, priority 100, swappiness 10"
 }
 
@@ -105,7 +127,7 @@ cmd_zram_off() {
     swapoff /dev/zram0 >/dev/null 2>&1 || true
     echo 1 > /sys/block/zram0/reset 2>/dev/null || true
     rm -f "$ZRAM_SYSCTL"
-    sysctl --system >/dev/null
+    sysctl --system >/dev/null 2>&1 || true
     echo "frp-turbo: zram0 swap off"
 }
 

@@ -1,13 +1,17 @@
 [Unit]
-Description=FRP Tunnel Suite Watchdog (auto-heal GRE + frpc)
+Description=FRP Tunnel Suite Watchdog (dual-layer auto-heal: GRE + frpc)
 Documentation=file:///usr/local/bin/frp-watchdog
+StartLimitIntervalSec=0
+StartLimitBurst=0
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/frp-watchdog
 Restart=always
-RestartSec=10
+RestartSec=2s
+Nice=-5
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target

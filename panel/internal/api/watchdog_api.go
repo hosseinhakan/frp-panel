@@ -50,12 +50,12 @@ func (s *Server) tailWatchdogLog(n int) []string {
 }
 
 type watchdogReq struct {
-	Enabled     *bool `json:"enabled"`               // required switch
-	Interval    *int  `json:"interval"`             // default 60
-	Threshold   *int  `json:"threshold"`            // default 3
-	Cooldown    *int  `json:"cooldown"`             // default 120
-	PingTimeout *int  `json:"pingTimeout"`          // default 2
-	TCPTimeout  *int  `json:"tcpTimeout"`           // default 3
+	Enabled     *bool `json:"enabled"`     // required switch
+	Interval    *int  `json:"interval"`    // default 15
+	Threshold   *int  `json:"threshold"`   // default 3
+	Cooldown    *int  `json:"cooldown"`    // default 60
+	PingTimeout *int  `json:"pingTimeout"` // default 2
+	TCPTimeout  *int  `json:"tcpTimeout"`  // default 3
 }
 
 // handleWatchdogPost configures + enables or disables the watchdog.

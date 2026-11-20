@@ -42,39 +42,65 @@ The bash CLI installs alongside from the same repo:
 sudo bash frp-setup.sh   # self-installs as /usr/local/bin/frp-manager
 ```
 
-## The Iran ↔ Foreign topology (the recommended setup)
+## The Iran ↔ Foreign topology (reverse FRP over GRE)
 
-Two VPSes, one GRE tunnel, all control traffic invisible to filtering:
+Two VPSes, one GRE tunnel, and FRP control traffic that never touches the
+public internet. **Iran is the entry/bridge; Foreign is the exit/backend.**
 
 ```
- ┌── Iran VPS ─────────────┐          ┌── Foreign VPS ──────────────┐
- │ frp-panel + frpc       │◄─ GRE ──►│ frps + frp-panel (peer)      │
- │ 10.100.111.2/30  gt11  │  proto47 │ 10.100.111.1/30  gt11        │
- └────────────────────────┘          └──────────────────────────────┘
+ User ──► Iran Public IP:port ──► frps (Iran, 10.100.111.2) ──► GRE (gt11) ──► frpc (Foreign, 10.100.111.1) ──► Foreign 127.0.0.1:port
 ```
 
-1. **Foreign side** — install the panel (above), open *GRE Tunnels* →
-   **New tunnel**. Fill this node's public IP and the Iran VPS public IP,
-   leave the private IPs blank (a free `10.100.x.y/30` pair is suggested).
-   The unit `gre-tunnel@<name>` comes up with conntrack bypass (proto 47)
-   and MSS clamping.
-2. Copy the **Mirror config** (one click) and save it as the same tunnel
-   name on the Iran VPS via its panel (or `frp-manager gre create …`) —
-   local/remote are swapped for you.
-3. **Foreign side** — *FRP Servers* → **New server**; pick bind address
-   `10.100.111.1` (the tunnel IP) so frps only accepts traffic arriving
-   through the tunnel. Copy the generated 32-char token.
-4. **Iran side** — *FRP Clients* → **New client**; server address
-   `10.100.111.1`, paste the token (or pick it from a local server config),
-   enter your ports (`22, 6000-6006`), keep the **TCP+UDP** toggle on for
-   dual rules per port. TLS and encryption are already on.
-5. Open `http://10.100.111.2:9000` (the Iran-side panel) or reach either
-   panel through the tunnel; the dashboard's latency chart shows both the
-   public and through-tunnel RTT live. Run *Turbo → Apply* on both nodes
-   for BBR + fq + 32 MB buffers over the long-haul link.
+| Node | Role | GRE `gt11` | FRP process | Public listener |
+|---|---|---|---|---|
+| **Iran** | entry / bridge | `10.100.111.2/30` | `frps` bound to `10.100.111.2:7025` | forwarded service ports only |
+| **Foreign** | exit / backend | `10.100.111.1/30` | `frpc` dials `10.100.111.2:7025` | none — it dials out over GRE |
 
-Single-node usage works the same way — just skip the GRE steps and bind
-frps to `::` (dual-stack).
+`frps` listens only on the tunnel IP, so the FRP control port is invisible to
+the public internet. Users reach the Foreign services on the **Iran public
+IP**, at the same forwarded port.
+
+### One-step setup (recommended)
+
+1. **Iran (entry)** — Dashboard → *FRP over GRE Reverse — Quick Setup* →
+   **Iran Node**. Enter the Iran and Foreign public IPs; keep `gt11`, control
+   port `7025` and a protocol. The wizard creates:
+   - `gt11` with `10.100.111.2/30 ↔ 10.100.111.1/30`, MTU `1400`, `NOTRACK`
+     for proto 47 and TCPMSS clamping;
+   - a fresh 32-char token and an `frps` instance bound **strictly** to
+     `10.100.111.2:<control_port>`, then enables both units;
+   - the dual-layer auto-heal watchdog (`frp-watchdog`, 15s interval, 3 strikes,
+     60s cooldown) — untick the wizard toggle to opt out.
+
+   Copy the generated **mirror payload** (or the equivalent CLI command).
+2. **Foreign (exit)** — run the same wizard on the Foreign node, choose
+   **Foreign Node**, paste the payload, and enter the local ports to expose
+   (`8443,2053,443`) plus the TCP/UDP toggle. It creates the mirrored `gt11`
+   (`10.100.111.1/30 ↔ 10.100.111.2/30`) and an `frpc` instance with
+   `tls.enable = true`, per-proxy `useEncryption = true`,
+   `useCompression = false`, then pings `10.100.111.2` through `gt11` and
+   reports the frpc unit state. It also allocates the loopback metrics
+   `webServer` port the watchdog uses for proxy health.
+3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
+   `1.2.3.4:443`).
+
+The same flow exists in the CLI: `frp-manager` → **14) FRP over GRE Reverse
+(Quick Setup)**, or non-interactively:
+
+```sh
+# Iran entry node (prints the mirror payload/command)
+frp-manager reverse iran --iran-public 1.2.3.4 --foreign-public 5.6.7.8
+
+# Foreign exit node (paste the payload, add the ports it exposes)
+frp-manager reverse foreign --payload /root/mirror.env \
+  --ports 8443,2053,443 --proto both
+```
+
+Manual configuration (separate GRE + server + client screens) still works and
+writes exactly the same files; the wizard just does all three at once.
+
+Single-node usage works the same way — skip GRE and bind frps to `::`
+(dual-stack).
 
 ## Layout
 
@@ -101,6 +127,7 @@ frps to `::` (dual-stack).
 - [x] P7 — backup/restore (ZIP export with secrets redaction, zip-slip-guarded import with `.bak` + credential regeneration) + watchdog API (CLI-byte-identical `watchdog.env`, enable/disable, heal-event tail)
 - [x] P8 — full dashboard UI (login + forced password change, dashboard with live SSE latency chart and service cards, servers/clients wizards with token generator + GRE-IP bindAddr selector, GRE manager with link test + mirror modal, turbo/logs/stats/backup/watchdog views — Alpine.js + HTMX, 100% vendored and embedded)
 - [x] P9 — release pipeline (one-line installer, `frp-panel install-unit` single-source unit, GitHub Actions CI + release workflow, CHANGELOG, this quickstart)
+- [x] P10 — FRP over GRE Reverse quick-setup wizard (`POST /api/wizard/gre-frp`, Dashboard modal, `frp-manager reverse iran|foreign`) and the corrected Iran-entry/Foreign-exit topology across docs and UI
 
 ## Quick checks (dev)
 
@@ -137,6 +164,7 @@ documented in `panel/internal/api/router.go`.
 | frpc instances | `GET/POST /api/clients` · `GET/PUT/DELETE /api/clients/{name}` · `POST/PUT/DELETE /api/clients/{name}/proxies` · `GET/PUT /api/clients/{name}/raw` |
 | services | `GET /api/services` · `POST /api/services/{unit}/action` |
 | GRE tunnels | `GET/POST /api/gre` · `GET/DELETE /api/gre/{name}` · `GET /api/gre/{name}/mirror` · `POST /api/gre/{name}/test` |
+| reverse wizard | `POST /api/wizard/gre-frp` (`role=iran` creates entry frps + gt11 and returns the mirror payload; `role=foreign` creates the mirrored gt11 + frpc and runs the link test) |
 | turbo | `GET/POST /api/system/turbo` |
 | monitoring | `GET /api/monitor/latency(/stream)` (SSE) · `GET /api/logs/units` · `GET /api/logs/stream?unit=…` (SSE) · `GET /api/stats` |
 | backup | `GET /api/backup/export[?secrets=1]` · `POST /api/backup/import` |

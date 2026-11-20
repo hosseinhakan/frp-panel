@@ -29,15 +29,15 @@ const (
 
 // ServerOptions collects the wizard inputs for a new frps instance.
 type ServerOptions struct {
-	BindAddr     string // default "::" (dual-stack, like the original script)
-	BindPort     int    // default 7000
-	Protocol     Protocol
-	TCPMux       bool
-	Token        string // generated when empty
-	WebAddr      string // default "127.0.0.1" when WebPort > 0
-	WebPort      int    // 0 disables the webServer block
-	WebUser      string // default "admin"
-	WebPassword  string // generated when empty and WebPort > 0
+	BindAddr    string // default "::" (dual-stack, like the original script)
+	BindPort    int    // default 7000
+	Protocol    Protocol
+	TCPMux      bool
+	Token       string // generated when empty
+	WebAddr     string // default "127.0.0.1" when WebPort > 0
+	WebPort     int    // 0 disables the webServer block
+	WebUser     string // default "admin"
+	WebPassword string // generated when empty and WebPort > 0
 }
 
 // NewServerConfig builds a ServerConfig with the suite's secure defaults.
@@ -64,11 +64,11 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	c.Transport.HeartbeatTimeout = 90
+	c.Transport.HeartbeatTimeout = 30
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 120
+	c.Transport.TCPKeepalive = 30
 
 	c.Auth.Method = "token"
 	if o.Token == "" {
@@ -110,7 +110,7 @@ type ClientOptions struct {
 	UseCompression bool // default false (saves RAM)
 	Ports          []PortSpec
 	Proto          ProtoToggle // default ProtoTCPAndUDP (dual TCP+UDP toggle)
-	LocalIP        string       // default "127.0.0.1"
+	LocalIP        string      // default "127.0.0.1"
 	WebAddr        string
 	WebPort        int
 	WebUser        string
@@ -151,11 +151,11 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.Protocol = o.Protocol
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
-	t.DialServerTimeout = 10
-	t.DialServerKeepalive = 120
-	t.PoolCount = 20
-	t.HeartbeatInterval = 30
-	t.HeartbeatTimeout = 90
+	t.DialServerTimeout = 5
+	t.DialServerKeepalive = 30
+	t.PoolCount = 30
+	t.HeartbeatInterval = 10
+	t.HeartbeatTimeout = 30
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 

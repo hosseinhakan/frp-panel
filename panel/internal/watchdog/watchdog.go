@@ -13,15 +13,18 @@ import (
 
 // Env is the watchdog tuning file's managed subset.
 type Env struct {
-	Interval    int `json:"interval"`    // probe interval in seconds (CLI default 60)
-	Threshold   int `json:"threshold"`   // consecutive failures before a restart (default 3)
-	Cooldown    int `json:"cooldown"`    // seconds between restart attempts (default 120)
+	Interval    int `json:"interval"`     // probe interval in seconds (default 15)
+	Threshold   int `json:"threshold"`    // consecutive failures before a restart (default 3)
+	Cooldown    int `json:"cooldown"`     // seconds between restart attempts (default 60)
 	PingTimeout int `json:"ping_timeout"` // ICMP probe timeout (default 2)
-	TCPTimeout  int `json:"tcp_timeout"` // control-channel probe timeout (default 3)
+	TCPTimeout  int `json:"tcp_timeout"`  // control-channel probe timeout (default 3)
 }
 
-// Default matches the CLI's watchdog_enable defaults.
-func Default() Env { return Env{Interval: 60, Threshold: 3, Cooldown: 120, PingTimeout: 2, TCPTimeout: 3} }
+// Default matches the CLI's watchdog_enable defaults: fast detection on
+// high-jitter routes without turning a flapping link into a restart storm.
+func Default() Env {
+	return Env{Interval: 15, Threshold: 3, Cooldown: 60, PingTimeout: 2, TCPTimeout: 3}
+}
 
 // Validate applies the CLI's own rules: interval >= 10, threshold >= 1,
 // cooldown and timeouts positive.

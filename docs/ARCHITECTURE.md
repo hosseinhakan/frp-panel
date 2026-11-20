@@ -493,7 +493,7 @@ WantedBy=multi-user.target
 `frp-gre up <name>` (idempotent — safe on restart/boot):
 
 ```
-ip tunnel add gt11 mode gre local <LOCAL_PUBLIC_IP> remote <REMOTE_PUBLIC_IP> ttl 64
+ip tunnel add gt11 mode gre local <LOCAL_PUBLIC_IP> remote <REMOTE_PUBLIC_IP> ttl 255
 ip addr add <LOCAL_PRIVATE_IP> dev gt11
 ip link set gt11 up mtu 1400
 # conntrack bypass for GRE (proto 47):
@@ -570,11 +570,15 @@ persisted via `frp-zram.service` (oneshot, RemainAfterExit). `zram-off` + option
   (name, type, status, cur_conns, traffic in/out) — fixtures pinned from the installed
   FRP version; 1-minute history kept 24 h in memory. Enables FRP's own dashboard for the
   user "for free" (same endpoint).
-- **Watchdog** `frp-watchdog.service` (loop, 60 s, Restart=always): GRE peer private-IP
-  ping (3 strikes → `systemctl restart gre-tunnel@x`, 120 s cooldown); frpc control TCP
-  probe + `systemctl is-failed` (3 strikes → restart, cooldown); panel self-healing left
-  to systemd `Restart=always`. Events → journal + `/var/log/frp-panel/watchdog.log` +
-  surfaced in UI. Config in `panel.toml [watchdog]` (enabled, interval, threshold, cooldown).
+- **Watchdog** `frp-watchdog.service` (loop, 15 s, `Restart=always`): **layer 1** pings
+  each GRE peer private IP through its interface (2 packets, 3 strikes →
+  `systemctl restart gre-tunnel@x`, 60 s cooldown, then restart every active `frpc@*`);
+  **layer 2** (when GRE is healthy) probes the frpc control TCP channel and, if the
+  loopback `webServer` exists, requires every proxy in `/api/status` to report `running`
+  (3 strikes → restart only that `frpc@*`, cooldown). Structured HEAL events → journal +
+  `/var/log/frp-panel/watchdog.log` + surfaced in the UI. Config lives in
+  `/etc/frp-panel/watchdog.env` (`INTERVAL`, `THRESHOLD`, `COOLDOWN`, `PING_TIMEOUT`,
+  `TCP_TIMEOUT`).
 
 ---
 

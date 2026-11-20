@@ -9,7 +9,7 @@ import (
 // The CLI writes watchdog.env via heredoc — Render must match those bytes.
 func TestRenderByteIdentity(t *testing.T) {
 	want := "# FRP Tunnel Suite watchdog tuning (used by /usr/local/bin/frp-watchdog)\n" +
-		"INTERVAL=60\nTHRESHOLD=3\nCOOLDOWN=120\nPING_TIMEOUT=2\nTCP_TIMEOUT=3\n"
+		"INTERVAL=15\nTHRESHOLD=3\nCOOLDOWN=60\nPING_TIMEOUT=2\nTCP_TIMEOUT=3\n"
 	if got := Render(Default()); got != want {
 		t.Fatalf("Render =\n%q\nwant\n%q", got, want)
 	}

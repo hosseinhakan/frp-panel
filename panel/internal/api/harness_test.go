@@ -23,7 +23,7 @@ import (
 // fakeRunner records every host command and answers from canned tables.
 type fakeRunner struct {
 	mu      sync.Mutex
-	calls   []string // "systemctl:enable --now frps@x" / "exec:ping -c 3 ..." / "verify:server"
+	calls   []string // "systemctl:enable frps@x" / "exec:ping -c 3 ..." / "verify:server"
 	verifyN int
 
 	systemctlErr bool // every systemctl call fails (no systemd on host)
@@ -80,6 +80,15 @@ func (f *fakeRunner) Systemctl(args ...string) (string, error) {
 	f.record("systemctl:%s", strings.Join(args, " "))
 	if f.systemctlErr {
 		return "System has not been booted with systemd", errors.New("systemctl: not available")
+	}
+	// Mirror the production guard: the panel must never pass a leading-dash
+	// flag (e.g. `enable --now`) through svc.Systemctl.
+	if len(args) > 0 && args[0] != "daemon-reload" {
+		for _, a := range args[1:] {
+			if strings.HasPrefix(a, "-") {
+				return "", fmt.Errorf("svc: systemctl arguments may not start with '-': %q", a)
+			}
+		}
 	}
 	if len(args) > 0 && (args[0] == "is-active" || args[0] == "is-enabled") {
 		var lines []string
@@ -146,13 +155,13 @@ func (f *fakeRunner) ExecStream(ctx context.Context, name string, args ...string
 // ---- test server -----------------------------------------------------------
 
 type testEnv struct {
-	t       *testing.T
-	srv     *Server
-	handler http.Handler
-	runner  *fakeRunner
-	root    string
+	t        *testing.T
+	srv      *Server
+	handler  http.Handler
+	runner   *fakeRunner
+	root     string
 	password string
-	clock   *fakeClock
+	clock    *fakeClock
 }
 
 type fakeClock struct{ now time.Time }
@@ -237,8 +246,8 @@ func (e *testEnv) authorized(method, path, body string) *httptest.ResponseRecord
 		e.t.Fatalf("login failed with %d", code)
 	}
 	return e.do(method, path, body, map[string]string{
-		"Cookie":  "frp_session=" + cookie,
-		"Origin":  "http://panel.local",
+		"Cookie":           "frp_session=" + cookie,
+		"Origin":           "http://panel.local",
 		"X-Requested-With": "XMLHttpRequest",
 	})
 }

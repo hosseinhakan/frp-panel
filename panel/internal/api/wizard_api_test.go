@@ -111,10 +111,10 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 		}
 	}
 
-	if !e.runner.called("systemctl:enable --now gre-tunnel@gt11") {
+	if !e.runner.called("systemctl:enable gre-tunnel@gt11") {
 		t.Error("gre-tunnel@gt11 not enabled")
 	}
-	if !e.runner.called("systemctl:enable --now frps@server-7025") {
+	if !e.runner.called("systemctl:enable frps@server-7025") {
 		t.Error("frps@server-7025 not enabled")
 	}
 }
@@ -319,7 +319,7 @@ func TestWizardWatchdogDefaultAndOptOut(t *testing.T) {
 	if wd == nil || wd["enabled"] != true {
 		t.Errorf("watchdog = %v, want enabled", wd)
 	}
-	if !e.runner.called("systemctl:enable --now frp-watchdog") {
+	if !e.runner.called("systemctl:enable frp-watchdog") {
 		t.Error("wizard did not enable frp-watchdog")
 	}
 	raw, err := os.ReadFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"))
@@ -341,7 +341,7 @@ func TestWizardWatchdogDefaultAndOptOut(t *testing.T) {
 	if wd == nil || wd["skipped"] != true {
 		t.Errorf("watchdog = %v, want skipped", wd)
 	}
-	if e2.runner.called("systemctl:enable --now frp-watchdog") {
+	if e2.runner.called("systemctl:enable frp-watchdog") {
 		t.Error("opt-out still enabled frp-watchdog")
 	}
 }
@@ -481,7 +481,7 @@ func TestWizardIranAutoFallbackOnBusyTunnelAndPort(t *testing.T) {
 			t.Errorf("mirror payload missing %q:\n%s", want, payload)
 		}
 	}
-	if !e.runner.called("systemctl:enable --now frps@server-7026") {
+	if !e.runner.called("systemctl:enable frps@server-7026") {
 		t.Error("frps@server-7026 not enabled")
 	}
 }
@@ -595,6 +595,132 @@ func TestWizardForeignIfaceFallbackKeepsMirroredSubnet(t *testing.T) {
 	warnings, _ := resp["warnings"].([]any)
 	if len(warnings) == 0 || !strings.Contains(warnings[0].(string), "gt11 was busy locally") {
 		t.Errorf("warnings = %v", warnings)
+	}
+}
+
+// foreignInstallerFixture is the shape produced by renderForeignScript: the
+// bash wrapper, quoted header assignments, shell statements and a heredoc that
+// reuses the header variables.
+const foreignInstallerFixture = `sudo bash <<'FRP_FOREIGN_SETUP'
+#!/usr/bin/env bash
+set -euo pipefail
+
+IFACE='gt11'
+IRAN_PUBLIC_IP='1.2.3.4'
+FOREIGN_PUBLIC_IP='5.6.7.8'
+IRAN_PRIVATE_IP='10.100.111.2/30'
+FOREIGN_PRIVATE_IP='10.100.111.1/30'
+MTU='1400'
+MSS_MODE='1220'
+SERVER_ADDR='10.100.111.2'
+SERVER_PORT='7025'
+PROTOCOL='tcp'
+TOKEN='abcdefghijklmnopqrstuvwxyz012345'
+PORTS='443,2053'
+CLIENT_NAME='client-7025'
+
+if [ "$(id -u)" -ne 0 ]; then echo 'run as root (sudo)' >&2; exit 1; fi
+cat > "/root/frp/gre/${IFACE}.env" <<EOF
+LOCAL_PUBLIC_IP=${FOREIGN_PUBLIC_IP}
+REMOTE_PUBLIC_IP=${IRAN_PUBLIC_IP}
+IFACE=${IFACE}
+LOCAL_PRIVATE_IP=${FOREIGN_PRIVATE_IP}
+REMOTE_PRIVATE_IP=${IRAN_PRIVATE_IP}
+MTU=${MTU}
+MSS_MODE=${MSS_MODE}
+EOF
+systemctl restart "gre-tunnel@${IFACE}"
+GC_CRON='0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps'
+PING_OK=0
+FRP_FOREIGN_SETUP
+`
+
+func TestParseMirrorPayloadAcceptsForeignInstaller(t *testing.T) {
+	mp, err := parseMirrorPayload(foreignInstallerFixture)
+	if err != nil {
+		t.Fatalf("installer paste rejected: %v", err)
+	}
+	if mp.Iface != "gt11" || mp.LocalPublicIP != "5.6.7.8" || mp.RemotePublicIP != "1.2.3.4" {
+		t.Errorf("identity fields = %+v", mp)
+	}
+	if mp.LocalPrivateIP != "10.100.111.1/30" || mp.RemotePrivateIP != "10.100.111.2/30" {
+		t.Errorf("private pair = %+v", mp)
+	}
+	if mp.ServerAddr != "10.100.111.2" || mp.ControlPort != 7025 || mp.Protocol != "tcp" {
+		t.Errorf("control link = %+v", mp)
+	}
+	if mp.MTU != 1400 || mp.MSSMode != "1220" {
+		t.Errorf("mtu/mss = %+v", mp)
+	}
+	if mp.Token != "abcdefghijklmnopqrstuvwxyz012345" {
+		t.Errorf("token = %q", mp.Token)
+	}
+	if mp.Ports != "443,2053" {
+		t.Errorf("ports = %q", mp.Ports)
+	}
+}
+
+func TestParseMirrorPayloadStillRejectsGarbage(t *testing.T) {
+	if _, err := parseMirrorPayload("hello world\nLOCAL_PUBLIC_IP=5.6.7.8\n"); err == nil {
+		t.Fatal("plain payload with a non KEY=VALUE line must still error")
+	}
+}
+
+func TestWizardForeignAcceptsInstallerPaste(t *testing.T) {
+	e := newTestEnv(t)
+	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(foreignInstallerFixture) +
+		`,"proto":"tcp","enableWatchdog":false}`
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("installer paste = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	if resp["unit_error"] != nil {
+		t.Errorf("unit_error = %v", resp["unit_error"])
+	}
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7025.toml"))
+	if err != nil {
+		t.Fatalf("frpc config missing: %v", err)
+	}
+	cfg, err := frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Token != "abcdefghijklmnopqrstuvwxyz012345" || cfg.ServerAddr != "10.100.111.2" ||
+		cfg.ServerPort != 7025 {
+		t.Errorf("client config = %+v", cfg)
+	}
+	if len(cfg.Proxies) != 2 {
+		t.Errorf("proxies = %d, want 2 (PORTS from the installer)", len(cfg.Proxies))
+	}
+}
+
+func TestWizardRolesNeverPassNowFlag(t *testing.T) {
+	e := newTestEnv(t)
+	if rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","enableWatchdog":false}`); rec.Code != http.StatusCreated {
+		t.Fatalf("iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
+		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
+		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	if rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"foreign","mirrorPayload":`+jsonQuote(payload)+
+			`,"localPorts":"443","proto":"tcp","enableWatchdog":false}`); rec.Code != http.StatusCreated {
+		t.Fatalf("foreign = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if e.runner.called("--now") {
+		t.Error("wizard passed a leading-dash systemctl flag (--now)")
+	}
+	if !e.runner.called("systemctl:enable frps@server-7025") ||
+		!e.runner.called("systemctl:restart frps@server-7025") {
+		t.Error("iran frps unit was not enabled + started")
+	}
+	if !e.runner.called("systemctl:enable frpc@client-7025") ||
+		!e.runner.called("systemctl:restart frpc@client-7025") {
+		t.Error("foreign frpc unit was not enabled + started")
 	}
 }
 

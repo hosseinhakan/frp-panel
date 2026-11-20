@@ -90,7 +90,7 @@ func TestServersCreateHappyPath(t *testing.T) {
 	if !e.runner.called("verify:server:") {
 		t.Error("write gate did not run frps verify")
 	}
-	if !e.runner.called("systemctl:enable --now frps@server-7000") {
+	if !e.runner.called("systemctl:enable frps@server-7000") {
 		t.Error("unit was not enabled via systemctl")
 	}
 }
@@ -250,7 +250,7 @@ func TestServersListAndGetAndDelete(t *testing.T) {
 	if len(baks) != 1 {
 		t.Errorf("expected exactly one .bak, got %v", baks)
 	}
-	if !e.runner.called("systemctl:disable --now frps@server-7000") {
+	if !e.runner.called("systemctl:disable frps@server-7000") {
 		t.Error("unit not disabled on delete")
 	}
 

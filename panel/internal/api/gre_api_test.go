@@ -77,7 +77,7 @@ func TestGRECreateWritesCLIByteIdenticalEnv(t *testing.T) {
 	}
 
 	// Unit enabled.
-	if !e.runner.called("systemctl:enable --now gre-tunnel@gt11") {
+	if !e.runner.called("systemctl:enable gre-tunnel@gt11") {
 		t.Error("gre-tunnel@gt11 not enabled")
 	}
 }
@@ -268,7 +268,7 @@ func TestGREDeleteTearsDown(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.srv.paths.GREDir, "gt11.env")); !os.IsNotExist(err) {
 		t.Error("env file not removed")
 	}
-	if !e.runner.called("systemctl:disable --now gre-tunnel@gt11") {
+	if !e.runner.called("systemctl:disable gre-tunnel@gt11") {
 		t.Error("unit not disabled")
 	}
 	if !e.runner.called("exec:frp-gre down gt11") {

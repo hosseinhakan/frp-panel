@@ -139,7 +139,7 @@ func (s *Server) turboApply(w http.ResponseWriter, r *http.Request) {
 func (s *Server) turboRevert(w http.ResponseWriter) {
 	// The CLI treats revert as best-effort (|| true); failures are
 	// reported but the drop-in removal is what matters.
-	if out, err := s.runner.Systemctl("disable", "--now", "tunnel-turbo"); err != nil {
+	if out, err := s.disableUnitNow("tunnel-turbo"); err != nil {
 		audit("turbo revert: disable failed: %s", strings.TrimSpace(out))
 	}
 	unitErr := ""
@@ -206,7 +206,7 @@ func (s *Server) zramOn(w http.ResponseWriter, req turboReq) {
 }
 
 func (s *Server) zramOff(w http.ResponseWriter) {
-	if out, err := s.runner.Systemctl("disable", "--now", "frp-zram"); err != nil {
+	if out, err := s.disableUnitNow("frp-zram"); err != nil {
 		audit("zram off: disable failed: %s", strings.TrimSpace(out))
 	}
 	unitErr := ""

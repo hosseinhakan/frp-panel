@@ -145,8 +145,8 @@ func TestTurboRevertBestEffort(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revert = %d: %s", rec.Code, rec.Body.String())
 	}
-	if !e.runner.called("systemctl:disable --now tunnel-turbo") {
-		t.Error("disable --now tunnel-turbo missing")
+	if !e.runner.called("systemctl:disable tunnel-turbo") {
+		t.Error("disable tunnel-turbo missing")
 	}
 	resp := jsonMap(t, rec)
 	if _, has := resp["unit_error"]; !has {
@@ -199,8 +199,8 @@ func TestTurboZramOff(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("zram-off = %d: %s", rec.Code, rec.Body.String())
 	}
-	if !e.runner.called("systemctl:disable --now frp-zram") {
-		t.Error("disable --now frp-zram missing")
+	if !e.runner.called("systemctl:disable frp-zram") {
+		t.Error("disable frp-zram missing")
 	}
 }
 

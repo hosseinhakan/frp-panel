@@ -314,7 +314,7 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | GET | `/api/stats?instance=…` | scraped frp webServer metrics + rolling history (conns, in/out bytes per proxy) |
 | GET | `/api/backup/export`, POST `/api/backup/import` | ZIP stream down / multipart restore (selective categories) |
 | GET | `/api/wizard/gre-frp/defaults` | next free GRE iface, `10.100.<n>.0/30` subnet and frps control port (scans envs, live links, configs, `/proc/net/tcp`) |
-| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict; optional custom token, frps bind (`GRE IP`/`::`/`0.0.0.0`) and `rawSpeed` |
+| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict; optional custom token, frps bind (`GRE IP`/`::`/`0.0.0.0`) and `rawSpeed`. `mirrorPayload` accepts both the plain `KEY=VALUE` block and the generated `FRP_FOREIGN_SETUP` script (shell lines ignored, quoted assignments extracted) |
 | GET | `/api/watchdog`, POST `/api/watchdog` | state, config (Telegram token masked), recent heal events |
 | POST | `/api/watchdog/test-telegram` | send one test alert using stored or posted credentials |
 | GET | `/api/health`, `/api/version` | unauthenticated liveness + build info |
@@ -359,7 +359,7 @@ P5 implementation notes:
   config from `/etc/frp-panel/zram.env`.
 - `POST /api/system/turbo {action}` mirrors the CLI exactly: `apply` →
   install embedded helper + units → `enable` + `restart tunnel-turbo`;
-  `revert` → `disable --now` + best-effort `frp-turbo revert` (failures
+  `revert` → `disable` + `stop` + best-effort `frp-turbo revert` (failures
   surface as `unit_error`); `zram-on {size, algo}` → CLI-byte-identical
   `zram.env` (`.bak` first) → `enable` + `restart frp-zram`; `zram-off`.
   Size/algo validated (128–32768 MB, lz4/zstd/lzo/lzo-rle).
@@ -539,8 +539,10 @@ iptables -t mangle -A FORWARD -i gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS -
 ```
 
 `down` = exact inverse (del rules by spec, `ip tunnel del`); `reload` = down+up.
-Both CLI and panel only ever: write the `.env`, `systemctl enable --now gre-tunnel@<name>`,
-and read status from `ip -json addr` + `/sys/class/net/gt11/statistics/` + prober.
+Both CLI and panel only ever write the `.env` and enable/start the unit. The CLI
+uses `systemctl enable --now`; the panel issues explicit `enable` + `restart`
+(`svc.Systemctl` rejects every argument beginning with `-`), then reads status
+from `ip -json addr` + `/sys/class/net/gt11/statistics/` + prober.
 
 ### 7.3 Workflow niceties
 

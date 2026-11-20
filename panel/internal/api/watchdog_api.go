@@ -113,7 +113,7 @@ func (s *Server) handleWatchdogPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !*req.Enabled {
-		if out, err := s.runner.Systemctl("disable", "--now", "frp-watchdog"); err != nil {
+		if out, err := s.disableUnitNow("frp-watchdog"); err != nil {
 			writeErr(w, http.StatusConflict, "systemctl disable frp-watchdog failed: %s",
 				strings.TrimSpace(strings.TrimSpace(out)+" "+err.Error()))
 			return
@@ -172,7 +172,7 @@ func (s *Server) handleWatchdogPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	unitErr := ""
-	if _, err := s.runner.Systemctl("enable", "--now", "frp-watchdog"); err != nil {
+	if _, err := s.enableUnitNow("frp-watchdog"); err != nil {
 		unitErr = err.Error()
 	}
 	// The helper sources the env on start — restart when it was already

@@ -279,7 +279,7 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	unit := "frps@" + req.Name
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		audit("created frps instance %s but enable failed: %s", req.Name, strings.TrimSpace(out))
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"name": req.Name, "file": path, "bindPort": cfgSrv.BindPort,
@@ -521,7 +521,7 @@ func (s *Server) handleServerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	unit := "frps@" + name
-	if out, err := s.runner.Systemctl("disable", "--now", unit); err != nil {
+	if out, err := s.disableUnitNow(unit); err != nil {
 		audit("disable %s failed during delete: %s", unit, strings.TrimSpace(out))
 	}
 	bak, err := s.backupAndRemove(path)

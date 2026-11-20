@@ -109,6 +109,34 @@ func (s *Server) unitIsActive(unit string) bool {
 	return err == nil && strings.HasPrefix(strings.TrimSpace(out), "active")
 }
 
+// enableUnitNow is the safe replacement for `systemctl enable --now`.
+//
+// svc.Systemctl rejects every argument that starts with "-", so the `--now`
+// shorthand can never reach systemctl through the panel. Issue the two
+// explicit commands instead: `enable` persists the unit at boot, while
+// `restart` starts it immediately (and reloads a running unit with the config
+// that was just written).
+func (s *Server) enableUnitNow(unit string) (string, error) {
+	if out, err := s.runner.Systemctl("enable", unit); err != nil {
+		return out, err
+	}
+	return s.runner.Systemctl("restart", unit)
+}
+
+// disableUnitNow is the safe replacement for `systemctl disable --now`:
+// disable removes the boot links, stop halts the running instance.
+func (s *Server) disableUnitNow(unit string) (string, error) {
+	out, err := s.runner.Systemctl("disable", unit)
+	stopOut, stopErr := s.runner.Systemctl("stop", unit)
+	if err != nil {
+		return out, err
+	}
+	if stopErr != nil {
+		return stopOut, stopErr
+	}
+	return stopOut, nil
+}
+
 type serviceActionReq struct {
 	Action string `json:"action"` // start | stop | restart | enable | disable
 }

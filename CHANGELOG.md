@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.2.4 — systemctl `--now` fix + paste-friendly Foreign payload
+
+### Fixed
+
+- **`systemctl … --now` no longer reaches the host.** `svc.Systemctl` rejects
+  every argument that starts with `-` (a deliberate injection guard), so the
+  `enable --now` / `disable --now` shorthand used by the wizard, CRUD, GRE,
+  Turbo and Watchdog handlers failed at runtime with
+  `svc: systemctl arguments may not start with '-'`. Every call now issues the
+  explicit `enable` + `restart` (or `disable` + `stop`) pair through the new
+  `enableUnitNow` / `disableUnitNow` helpers in `services.go`. This fixes the
+  Reverse GRE+FRP wizard on both the Iran (frps, gre-tunnel) and Foreign
+  (frpc) roles, plus instance create/delete and Turbo/Watchdog toggles.
+- **Mirror payload accepts the generated installer.** Pasting the
+  `sudo bash <<'FRP_FOREIGN_SETUP' …` block from Option 1 into the Foreign
+  panel's “Mirror payload from the Iran node” box now works: shell lines are
+  ignored and the embedded `KEY='VALUE'` assignments are extracted (with
+  quotes stripped). Both the canonical names (`LOCAL_PUBLIC_IP`,
+  `CONTROL_PORT`) and the installer names (`FOREIGN_PUBLIC_IP`,
+  `IRAN_PUBLIC_IP`, `SERVER_PORT`) are understood, heredoc `${…}` expansions
+  are skipped so concrete values win, and `PORTS` supplies the local-port list
+  when the form leaves it blank.
+- The generated installer now prints `PROTOCOL`, `TOKEN` and `PORTS` in its
+  header, so the whole Option 1 script is also a complete Option 2 payload.
+
+### UI
+
+- The Iran wizard result now labels the two hand-off paths explicitly:
+  **Option 1 — Run in Foreign SSH Terminal (no panel needed)** and
+  **Option 2 — Paste into Foreign Web Panel (Mirror Payload)**.
+- The mirror textarea hint notes that both formats are accepted.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`,
+  `scripts/check-sync.sh`.
+- New regression tests: `TestWizardRolesNeverPassNowFlag`,
+  `TestParseMirrorPayloadAcceptsForeignInstaller`,
+  `TestParseMirrorPayloadStillRejectsGarbage`,
+  `TestWizardForeignAcceptsInstallerPaste`. The API test fake now mirrors the
+  production leading-dash guard, so any reintroduced `--now` fails the suite.
+
 ## v1.2.3 — mikeesierrah profile, full editors + one-click Foreign installer
 
 ### Config profile (`frpconf`)

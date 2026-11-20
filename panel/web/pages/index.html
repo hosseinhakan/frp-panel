@@ -350,8 +350,8 @@
                       <div class="field">
                         <label>Mirror payload from the Iran node</label>
                         <textarea class="input rawedit" x-model="rev.mirrorPayload" spellcheck="false"
-                                  placeholder="Paste the IFACE=… TOKEN=… block here"></textarea>
-                        <span class="hint">Paste the payload, or leave it empty and fill the fields below.</span>
+                                  placeholder="Paste the IFACE=… TOKEN=… payload or the full FRP_FOREIGN_SETUP script here"></textarea>
+                        <span class="hint">Accepts both the plain KEY=VALUE payload and the generated Foreign setup script; shell lines are ignored.</span>
                       </div>
                       <div class="field-row mt05">
                         <div class="field">
@@ -456,22 +456,11 @@
                               <span x-text="'unit start failed: ' + (rev.result.unit_error || rev.result.tunnel_unit_error)"></span>
                             </div>
                           </template>
-                          <p class="navgroup-label mt1">mirror payload — paste on the Foreign node</p>
-                          <pre class="logpane" x-text="rev.result.mirror_payload"></pre>
-                          <div class="btn-row mt05">
-                            <button class="btn" @click="revCopy(rev.result.mirror_payload)">copy payload</button>
-                          </div>
-                          <p class="navgroup-label mt1">CLI command — edit the ports on the Foreign node</p>
-                          <pre class="logpane" x-text="rev.result.mirror_command"></pre>
-                          <div class="btn-row mt05">
-                            <button class="btn" @click="revCopy(rev.result.mirror_command)">copy command</button>
-                          </div>
-
-                          <p class="navgroup-label mt1">1-click Foreign setup — paste on the Foreign server</p>
+                          <p class="navgroup-label mt1">Option 1 — Run in Foreign SSH Terminal (no panel needed)</p>
                           <p class="faint small">
                             Self-contained Bash: creates the mirrored GRE tunnel + systemd units, installs
                             frpc if missing, writes the matching config, then pings the tunnel and checks
-                            the unit. Only root SSH is needed on the Foreign host.
+                            the unit. Only root SSH is needed on the Foreign host — frp-panel is not required.
                           </p>
                           <div class="field-row mt05">
                             <div class="field">
@@ -510,10 +499,22 @@
                             <div class="notice warn mt05"><span class="mono" x-text="rev.result.foreign_script_error"></span></div>
                           </template>
 
-                          <p class="faint small mt05">
-                            Alternative: run this wizard on the Foreign node, choose <strong>Foreign Node</strong>,
-                            paste the payload, add the local ports, and run the link test.
+                          <p class="navgroup-label mt1">Option 2 — Paste into Foreign Web Panel (Mirror Payload)</p>
+                          <p class="faint small">
+                            On the Foreign node open <strong>Reverse GRE + FRP</strong>, choose
+                            <strong>Foreign Node</strong>, paste this block into “Mirror payload from the
+                            Iran node”, add the local ports, and run. The box also accepts the full
+                            Option 1 script when you paste it directly.
                           </p>
+                          <pre class="logpane" x-text="rev.result.mirror_payload"></pre>
+                          <div class="btn-row mt05">
+                            <button class="btn" @click="revCopy(rev.result.mirror_payload)">copy payload</button>
+                          </div>
+                          <p class="navgroup-label mt1">CLI command — edit the ports on the Foreign node</p>
+                          <pre class="logpane" x-text="rev.result.mirror_command"></pre>
+                          <div class="btn-row mt05">
+                            <button class="btn" @click="revCopy(rev.result.mirror_command)">copy command</button>
+                          </div>
                         </div>
                       </template>
                       <template x-if="rev.role === 'foreign'">

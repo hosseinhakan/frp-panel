@@ -348,6 +348,25 @@ func buildForeignScript(t gre.Tunnel, serverAddr string, serverPort int, token, 
 	return cfg, script, nil
 }
 
+// clientPortsSpec returns the forwarded-port list for the installer header.
+// New configs carry the compact range string; older/plain configs fall back to
+// their unique TCP remote ports.
+func clientPortsSpec(cfg *frpconf.ClientConfig) string {
+	if cfg.RangeLocal != "" {
+		return cfg.RangeLocal
+	}
+	seen := map[int]bool{}
+	var specs []frpconf.PortSpec
+	for _, p := range cfg.Proxies {
+		if p.Type != "tcp" || seen[p.RemotePort] {
+			continue
+		}
+		seen[p.RemotePort] = true
+		specs = append(specs, frpconf.PortSpec{Start: p.RemotePort, End: p.RemotePort})
+	}
+	return frpconf.FormatPortSpecs(specs)
+}
+
 func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientConfig, clientName string) (string, error) {
 	helper, err := assets.FS.ReadFile("helpers/frp-gre")
 	if err != nil {
@@ -388,6 +407,9 @@ func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientCon
 	w("MSS_MODE=%s", shellSingle(t.MSSMode))
 	w("SERVER_ADDR=%s", shellSingle(serverAddr))
 	w("SERVER_PORT=%s", shellSingle(strconv.Itoa(cfg.ServerPort)))
+	w("PROTOCOL=%s", shellSingle(cfg.Transport.Protocol))
+	w("TOKEN=%s", shellSingle(cfg.Auth.Token))
+	w("PORTS=%s", shellSingle(clientPortsSpec(cfg)))
 	w("CLIENT_NAME=%s", shellSingle(clientName))
 	w("")
 	w("if [ \"$(id -u)\" -ne 0 ]; then echo 'run as root (sudo)' >&2; exit 1; fi")

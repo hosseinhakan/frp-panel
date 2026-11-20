@@ -82,8 +82,8 @@ func TestWatchdogEnableWritesCLIBytes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.srv.paths.UnitDir, "frp-watchdog.service")); err != nil {
 		t.Errorf("frp-watchdog.service not installed: %v", err)
 	}
-	if !e.runner.called("systemctl:enable --now frp-watchdog") {
-		t.Error("enable --now frp-watchdog missing")
+	if !e.runner.called("systemctl:enable frp-watchdog") {
+		t.Error("enable frp-watchdog missing")
 	}
 	if !e.runner.called("systemctl:restart frp-watchdog") {
 		t.Error("active unit not restarted to pick up new tuning")
@@ -127,8 +127,8 @@ func TestWatchdogDisable(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
 	}
-	if !e.runner.called("systemctl:disable --now frp-watchdog") {
-		t.Error("disable --now frp-watchdog missing")
+	if !e.runner.called("systemctl:disable frp-watchdog") {
+		t.Error("disable frp-watchdog missing")
 	}
 	// No env file materializes from a disable.
 	if _, err := os.Stat(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env")); err == nil {

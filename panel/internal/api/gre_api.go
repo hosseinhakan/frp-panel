@@ -172,7 +172,7 @@ func (s *Server) handleGRECreate(w http.ResponseWriter, r *http.Request) {
 
 	unit := "gre-tunnel@" + t.Name
 	unitErr := ""
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("created GRE tunnel %s but enable failed: %s", t.Name, unitErr)
 	}
@@ -330,7 +330,7 @@ func (s *Server) handleGREDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	unit := "gre-tunnel@" + t.Name
-	if out, err := s.runner.Systemctl("disable", "--now", unit); err != nil {
+	if out, err := s.disableUnitNow(unit); err != nil {
 		audit("disable %s failed during delete: %s", unit, strings.TrimSpace(out))
 	}
 	// Teardown is best-effort (interface may already be gone), like the CLI's

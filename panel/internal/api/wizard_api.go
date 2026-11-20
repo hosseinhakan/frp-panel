@@ -88,6 +88,7 @@ type mirrorParams struct {
 	ControlPort     int
 	Protocol        string
 	Token           string
+	Ports           string // optional forwarded-port list (from the Foreign installer)
 }
 
 // ---- entry handler ---------------------------------------------------------
@@ -212,7 +213,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	}
 	unit := "frps@" + name
 	unitErr := ""
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard created frps@%s but enable failed: %s", name, unitErr)
 	}
@@ -326,7 +327,11 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
-	specs, err := frpconf.ParsePortSpecs(req.LocalPorts)
+	portsInput := strings.TrimSpace(req.LocalPorts)
+	if portsInput == "" {
+		portsInput = strings.TrimSpace(mp.Ports)
+	}
+	specs, err := frpconf.ParsePortSpecs(portsInput)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
@@ -439,7 +444,7 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 	}
 	unit := "frpc@" + name
 	unitErr := ""
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard created frpc@%s but enable failed: %s", name, unitErr)
 	}
@@ -546,7 +551,7 @@ func (s *Server) upsertWizardTunnel(t gre.Tunnel) (wizardTunnelResult, error) {
 	}
 	res := wizardTunnelResult{Warnings: warnings, Backup: backup}
 	unit := "gre-tunnel@" + t.Name
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		res.UnitError = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard wrote %s but enable failed: %s", unit, res.UnitError)
 	}
@@ -576,7 +581,7 @@ func (s *Server) wizardEnableWatchdog() map[string]any {
 	res["config"] = env
 
 	unitErr := ""
-	if out, err := s.runner.Systemctl("enable", "--now", "frp-watchdog"); err != nil {
+	if out, err := s.enableUnitNow("frp-watchdog"); err != nil {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard could not enable frp-watchdog: %s", unitErr)
 	}
@@ -683,59 +688,113 @@ func resolveMirror(req *wizardGREFRPReq) (mirrorParams, error) {
 	return mp, nil
 }
 
-// parseMirrorPayload reads the KEY=VALUE block the Iran wizard prints.
+// mirrorAssignment matches an environment assignment with an upper-case key.
+// Both the canonical mirror payload and the generated Foreign installer use
+// this shape (the installer additionally quotes the value).
+var mirrorAssignment = regexp.MustCompile(`^(?:export[ \t]+)?([A-Z][A-Z0-9_]*)[ \t]*=(.*)$`)
+
+// parseMirrorPayload reads either the KEY=VALUE block the Iran wizard prints
+// or the full self-contained Foreign installer
+// (`sudo bash <<'FRP_FOREIGN_SETUP' …`). Shell lines are ignored in script
+// mode; only concrete KEY='VALUE' assignments are extracted, with quotes
+// stripped. Heredoc lines such as LOCAL_PUBLIC_IP=${FOREIGN_PUBLIC_IP} are
+// skipped so the concrete header values always win.
 func parseMirrorPayload(payload string) (mirrorParams, error) {
 	mp := mirrorParams{}
-	for _, line := range strings.Split(payload, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	script := looksLikeShellScript(payload)
+	for _, rawLine := range strings.Split(payload, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
+		m := mirrorAssignment.FindStringSubmatch(line)
+		if m == nil {
+			if script {
+				continue // shell syntax: if/done/cat/systemctl/…
+			}
 			return mp, fmt.Errorf("invalid mirror payload line %q (want KEY=VALUE)", line)
 		}
-		key = strings.ToUpper(strings.TrimSpace(key))
-		val = strings.TrimSpace(val)
-		switch key {
-		case "IFACE":
-			mp.Iface = val
-		case "LOCAL_PUBLIC_IP":
-			mp.LocalPublicIP = val
-		case "REMOTE_PUBLIC_IP":
-			mp.RemotePublicIP = val
-		case "LOCAL_PRIVATE_IP":
-			mp.LocalPrivateIP = val
-		case "REMOTE_PRIVATE_IP":
-			mp.RemotePrivateIP = val
-		case "MTU":
-			n, err := strconv.Atoi(val)
-			if err != nil {
-				return mp, fmt.Errorf("invalid MTU %q in mirror payload", val)
-			}
-			mp.MTU = n
-		case "MSS_MODE":
-			mp.MSSMode = val
-		case "SERVER_ADDR":
-			mp.ServerAddr = val
-		case "CONTROL_PORT":
-			n, err := strconv.Atoi(val)
-			if err != nil {
-				return mp, fmt.Errorf("invalid CONTROL_PORT %q in mirror payload", val)
-			}
-			mp.ControlPort = n
-		case "PROTOCOL":
-			mp.Protocol = strings.ToLower(val)
-		case "TOKEN":
-			mp.Token = val
-		default:
-			// tolerate unknown keys like the GRE env parser does
+		key := m[1]
+		val := unquoteShellValue(strings.TrimSpace(m[2]))
+		if script && strings.Contains(val, "$") {
+			continue // variable expansion inside the installer heredoc
+		}
+		if err := applyMirrorKey(&mp, key, val); err != nil {
+			return mp, err
 		}
 	}
 	if mp.LocalPublicIP == "" || mp.RemotePublicIP == "" {
 		return mp, fmt.Errorf("mirror payload is missing LOCAL_PUBLIC_IP / REMOTE_PUBLIC_IP")
 	}
 	return mp, nil
+}
+
+// applyMirrorKey maps one assignment onto the mirror model. Both the mirror
+// payload names (LOCAL_PUBLIC_IP, CONTROL_PORT, …) and the Foreign installer
+// names (FOREIGN_PUBLIC_IP, IRAN_PUBLIC_IP, SERVER_PORT, …) are accepted.
+func applyMirrorKey(mp *mirrorParams, key, val string) error {
+	switch key {
+	case "IFACE":
+		mp.Iface = val
+	case "LOCAL_PUBLIC_IP", "FOREIGN_PUBLIC_IP":
+		mp.LocalPublicIP = val
+	case "REMOTE_PUBLIC_IP", "IRAN_PUBLIC_IP":
+		mp.RemotePublicIP = val
+	case "LOCAL_PRIVATE_IP", "FOREIGN_PRIVATE_IP":
+		mp.LocalPrivateIP = val
+	case "REMOTE_PRIVATE_IP", "IRAN_PRIVATE_IP":
+		mp.RemotePrivateIP = val
+	case "MTU":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("invalid MTU %q in mirror payload", val)
+		}
+		mp.MTU = n
+	case "MSS_MODE":
+		mp.MSSMode = val
+	case "SERVER_ADDR":
+		mp.ServerAddr = val
+	case "CONTROL_PORT", "SERVER_PORT":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("invalid %s %q in mirror payload", key, val)
+		}
+		mp.ControlPort = n
+	case "PROTOCOL":
+		mp.Protocol = strings.ToLower(val)
+	case "TOKEN":
+		mp.Token = val
+	case "PORTS", "LOCAL_PORTS":
+		mp.Ports = val
+	}
+	return nil
+}
+
+// looksLikeShellScript reports whether the pasted text is the generated
+// installer rather than the bare KEY=VALUE payload.
+func looksLikeShellScript(s string) bool {
+	if strings.Contains(s, "FRP_FOREIGN_SETUP") || strings.Contains(s, "FRP_CLIENT_TOML") {
+		return true
+	}
+	for _, marker := range []string{
+		"#!/usr/bin/env bash", "#!/bin/bash", "sudo bash", "set -euo pipefail",
+		"systemctl ", "cat > ", "ip tunnel ", "apt-get ",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// unquoteShellValue strips one layer of matching single or double quotes.
+func unquoteShellValue(v string) string {
+	if len(v) >= 2 {
+		if (v[0] == '\'' && v[len(v)-1] == '\'') || (v[0] == '"' && v[len(v)-1] == '"') {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }
 
 func renderMirrorPayload(m mirrorParams) string {

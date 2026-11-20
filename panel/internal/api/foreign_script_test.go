@@ -42,6 +42,10 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"FOREIGN_PRIVATE_IP='10.100.111.1/30'",
 		"IRAN_PRIVATE_IP='10.100.111.2/30'",
 		"SERVER_ADDR='10.100.111.2'",
+		"SERVER_PORT='7025'",
+		"PROTOCOL='tcp'",
+		"TOKEN='ServerToken1234567890'",
+		"PORTS='8989,8443'",
 		"CLIENT_NAME='client-7025'",
 		"ip tunnel add",       // embedded frp-gre helper
 		"systemctl is-active", // verification step

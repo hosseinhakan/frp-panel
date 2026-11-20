@@ -366,7 +366,7 @@ func (s *Server) handleClientsCreate(w http.ResponseWriter, r *http.Request) {
 		"verify": gate.VerifyMode, "backup": gate.Backup,
 		"proxies": len(cfg.Proxies),
 	}
-	if out, err := s.runner.Systemctl("enable", "--now", unit); err != nil {
+	if out, err := s.enableUnitNow(unit); err != nil {
 		audit("created frpc instance %s but enable failed: %s", req.Name, strings.TrimSpace(out))
 		resp["unit_error"] = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		writeJSON(w, http.StatusCreated, resp)
@@ -690,7 +690,7 @@ func (s *Server) handleClientDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	unit := "frpc@" + name
-	if out, err := s.runner.Systemctl("disable", "--now", unit); err != nil {
+	if out, err := s.disableUnitNow(unit); err != nil {
 		audit("disable %s failed during delete: %s", unit, strings.TrimSpace(out))
 	}
 	bak, err := s.backupAndRemove(path)

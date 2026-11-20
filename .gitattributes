@@ -1,0 +1,9 @@
+# Keep shell scripts and config goldens byte-identical across platforms:
+# a CRLF checkout would break `bash -n`, `check-sync.sh` and systemd units.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary
+*.gz binary
+*.tar binary

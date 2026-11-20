@@ -1,0 +1,66 @@
+# release.yml — tag v* → test, build both architectures, publish a GitHub
+# Release with the tarballs the installers consume:
+#   frp-panel_linux_amd64.tar.gz(.sha256)   frp-panel_linux_arm64.tar.gz(.sha256)
+#
+# scripts/build-release.sh runs go vet + go test before packaging; the
+# workflow additionally gates on the heredoc/asset sync guard so a release
+# can never ship with CLI ↔ panel asset drift.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without the v prefix)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: panel/go.mod
+          cache-dependency-path: panel/go.sum
+
+      - name: resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: heredoc/asset sync gate
+        run: ./scripts/check-sync.sh
+
+      - name: build + package + test
+        run: ./scripts/build-release.sh "${{ steps.ver.outputs.version }}"
+
+      - name: smoke the built binary
+        run: |
+          tmp="$(mktemp -d)"
+          ./dist/frp-panel_linux_amd64/frp-panel version
+          ./dist/frp-panel_linux_amd64/frp-panel verify --kind server \
+            --file panel/internal/frpconf/golden/server-quic.toml
+          ./dist/frp-panel_linux_amd64/frp-panel install-unit --unit-dir "$tmp"
+          grep -q 'Description=FRP Tunnel Suite Web Panel' "$tmp/frp-panel.service"
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/frp-panel_linux_amd64.tar.gz
+            dist/frp-panel_linux_amd64.tar.gz.sha256
+            dist/frp-panel_linux_arm64.tar.gz
+            dist/frp-panel_linux_arm64.tar.gz.sha256

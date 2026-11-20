@@ -1,0 +1,1352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FRP Panel</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/uPlot.min.css">
+  <!-- htmx: no indicator <style> injection (kept CSP-clean: style-src 'self') -->
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <script src="/static/js/vendor/htmx.min.js" defer></script>
+  <script src="/static/js/vendor/htmx-sse.min.js" defer></script>
+  <script src="/static/js/vendor/uPlot.min.js" defer></script>
+  <!-- app.js must load before Alpine: it registers the alpine:init
+       component factories, and Alpine may start as soon as it loads -->
+  <script src="/static/js/app.js" defer></script>
+  <script src="/static/js/vendor/alpine.min.js" defer></script>
+</head>
+<body x-data="shell" x-cloak>
+
+  <!-- Shell-owned latency prober hub: persistent across views, feeding the
+       $store.latency chart data. The stream is opened from shell.init() via
+       FRP.sse — htmx's sse extension owns the EventSource lifecycle and
+       payloads are tapped directly in app.js. -->
+  <div id="sse-latency" class="hidden" hx-ext="sse">
+    <div sse-swap="snapshot,sample" hx-swap="none"></div>
+  </div>
+
+  <div class="shell">
+
+    <!-- ============ sidebar ============ -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">⇄</div>
+        <div>
+          <div class="brand-name">FRP Panel</div>
+          <div class="brand-sub">Tunnel &amp; FRP Management Suite</div>
+        </div>
+      </div>
+
+      <div class="navwrap">
+        <template x-for="g in navGroups" :key="g.label">
+          <div class="navgroup">
+            <div class="navgroup-label" x-text="g.label"></div>
+            <template x-for="v in viewsInGroup(g.filter)" :key="v.id">
+              <button class="navitem" :class="{ active: view === v.id }" @click="nav(v.id)">
+                <span class="nav-ico" x-text="v.ico"></span>
+                <span x-text="v.label"></span>
+              </button>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <div class="sidefoot">
+        <div class="rowline"><span class="faint">panel</span><span class="mono" x-text="'v' + (health.version || '…')"></span></div>
+        <div class="rowline"><span class="faint">uptime</span><span class="mono" x-text="FRP.fmtUptime(health.uptime_seconds)"></span></div>
+      </div>
+    </aside>
+
+    <!-- ============ main column ============ -->
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-title" x-text="(views.find(v => v.id === view) || {}).label || ''"></div>
+        <div class="spacer"></div>
+        <span class="pill" :class="$store.latency.connected ? 'ok' : 'warn'">
+          <span class="dot" :class="{ live: $store.latency.connected }"></span>
+          <span x-text="$store.latency.connected ? 'latency live' : 'latency off'"></span>
+        </span>
+        <span class="pill idle" x-show="me" x-cloak x-text="'user: ' + (me ? me.username : '')"></span>
+        <button class="btn ghost sm" @click="logout()">Sign out</button>
+      </header>
+
+      <main class="content">
+
+        <!-- ================= Dashboard ================= -->
+        <template x-if="view === 'dashboard'">
+          <section x-data="dashboardView">
+            <div class="viewhead">
+              <div>
+                <h1>Dashboard</h1>
+                <p>Live tunnel, service and traffic state — the same files and units the CLI manages.</p>
+              </div>
+              <div class="grow"></div>
+              <span class="pill" :class="turboOn ? 'ok' : 'idle'" x-text="turboOn ? 'BBR+fq turbo on' : 'turbo off'"></span>
+              <span class="pill" :class="zramOn ? 'ok' : 'idle'" x-text="zramOn ? 'zram active' : 'zram off'"></span>
+            </div>
+
+            <div class="statgrid mb1">
+              <div class="stat">
+                <div class="stat-label">active FRP connections</div>
+                <div class="stat-value" x-text="totalConns"></div>
+                <div class="stat-sub" x-text="statsUp.length + ' of ' + stats.length + ' instances up'"></div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">traffic in</div>
+                <div class="stat-value" x-text="FRP.fmtBytes(totalIn)"></div>
+                <div class="stat-sub">sum over instances</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">traffic out</div>
+                <div class="stat-value" x-text="FRP.fmtBytes(totalOut)"></div>
+                <div class="stat-sub">sum over instances</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">watchdog</div>
+                <div class="stat-value" x-text="watchdog && watchdog.unit ? watchdog.unit.active : '—'"></div>
+                <div class="stat-sub" x-text="watchdog && watchdog.config ? 'every ' + watchdog.config.interval + 's' : 'not configured'"></div>
+              </div>
+            </div>
+
+            <div class="grid grid-2">
+              <!-- live latency -->
+              <div class="card">
+                <div class="card-head">
+                  <h2>Link latency</h2>
+                  <div class="grow"></div>
+                  <span class="muted small" x-text="'sampled every ' + $store.latency.intervalSec + 's · ICMP + TCP RTT'"></span>
+                </div>
+                <template x-if="$store.latency.order.length">
+                  <div>
+                    <div class="chart" x-ref="chart"></div>
+                    <div class="tblwrap mt05">
+                      <table class="tbl">
+                        <thead>
+                          <tr><th>target</th><th>kind</th><th>host</th><th class="num">rtt</th><th class="num">loss</th><th class="num">samples</th></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="id in $store.latency.order" :key="id">
+                            <tr>
+                              <td class="mono" x-text="id"></td>
+                              <td><span class="badge" :class="$store.latency.targets[id].kind === 'tcp' ? 'tcp' : ($store.latency.targets[id].kind === 'icmp-tunnel' ? 'udp' : '')" x-text="$store.latency.targets[id].kind"></span></td>
+                              <td class="mono muted" x-text="$store.latency.targets[id].host"></td>
+                              <td class="num">
+                                <span class="pill" :class="$store.latency.targets[id].ok ? 'ok' : 'bad'" x-text="FRP.fmtRtt($store.latency.targets[id].rtt_ms)"></span>
+                              </td>
+                              <td class="num" x-text="$store.latency.targets[id].loss_pct + '%'"></td>
+                              <td class="num" x-text="$store.latency.targets[id].samples"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!$store.latency.order.length">
+                  <div class="empty">
+                    <div class="empty-ico">∿</div>
+                    <p>No probe targets yet. Every GRE tunnel adds its peer (public + through-tunnel)
+                      and every FRP client adds its control channel here automatically.</p>
+                  </div>
+                </template>
+              </div>
+
+              <!-- service status -->
+              <div class="card">
+                <div class="card-head"><h2>Services</h2></div>
+                <template x-if="!services.length">
+                  <div class="empty">
+                    <div class="empty-ico">◉</div>
+                    <p>No suite units discovered yet. Create a server, client or tunnel to begin.</p>
+                  </div>
+                </template>
+                <div class="stack">
+                  <template x-for="g in svcGroups" :key="g.label">
+                    <div>
+                      <div class="navgroup-label" x-text="g.label"></div>
+                      <div class="stack">
+                        <template x-for="s in g.items" :key="s.unit">
+                          <div class="svc">
+                            <div class="svc-top">
+                              <span class="pill" :class="pillFor(s.active)"><span class="dot"></span><span x-text="s.active"></span></span>
+                              <span class="svc-name" x-text="s.unit"></span>
+                              <div class="grow"></div>
+                              <span class="svc-meta" x-text="s.enabled"></span>
+                            </div>
+                            <div class="svc-actions">
+                              <button class="btn tiny" @click="unitAction(s.unit, 'start')">start</button>
+                              <button class="btn tiny" @click="unitAction(s.unit, 'restart')">restart</button>
+                              <button class="btn tiny" @click="unitAction(s.unit, 'stop')">stop</button>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <!-- ================= FRP Servers ================= -->
+        <template x-if="view === 'servers'">
+          <section x-data="serversView">
+            <div class="viewhead">
+              <div>
+                <h1>FRP Servers</h1>
+                <p>frps instances in <span class="mono">/root/frp/server/*.toml</span>, run as <span class="mono">frps@&lt;name&gt;</span>.</p>
+              </div>
+              <div class="grow"></div>
+              <button class="btn primary" @click="openCreate()">+ New server</button>
+            </div>
+
+            <template x-if="loading"><p class="muted">loading…</p></template>
+
+            <template x-if="!loading && !rows.length">
+              <div class="empty">
+                <div class="empty-ico">▤</div>
+                <p>No frps instance on this node yet.</p>
+                <button class="btn primary" @click="openCreate()">Create the first server</button>
+              </div>
+            </template>
+
+            <template x-if="rows.length">
+              <div class="tblwrap">
+                <table class="tbl">
+                  <thead>
+                    <tr>
+                      <th>instance</th><th>bind</th><th>protocol</th><th>web</th><th>token</th>
+                      <th>unit</th><th>boot</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="r in rows" :key="r.name">
+                      <tr>
+                        <td>
+                          <span class="mono" x-text="r.name"></span>
+                          <template x-if="r.parseError"><span class="pill bad" title="the file no longer parses">parse error</span></template>
+                          <template x-if="r.style === 'advanced' || r.style === 'template'">
+                            <span class="pill warn" x-text="r.style + ' — raw edits only'"></span>
+                          </template>
+                        </td>
+                        <td class="mono" x-text="FRP.fmtAddr(r.bindAddr, r.bindPort)"></td>
+                        <td x-text="r.protocol"></td>
+                        <td class="mono" x-text="r.webPort ? r.webPort : '—'"></td>
+                        <td>
+                          <span class="pill" :class="r.tokenSet ? 'ok' : 'bad'" x-text="r.tokenSet ? 'set' : 'missing'"></span>
+                        </td>
+                        <td><span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="r.unit.active"></span></td>
+                        <td><span class="pill" :class="r.unit.enabled === 'enabled' ? 'ok' : 'idle'" x-text="r.unit.enabled"></span></td>
+                        <td>
+                          <div class="btn-row">
+                            <template x-if="r.unit.active === 'active'">
+                              <button class="btn tiny" @click="action('frps@' + r.name, 'restart')">restart</button>
+                            </template>
+                            <template x-if="r.unit.active === 'active'">
+                              <button class="btn tiny" @click="action('frps@' + r.name, 'stop')">stop</button>
+                            </template>
+                            <template x-if="r.unit.active !== 'active'">
+                              <button class="btn tiny" @click="action('frps@' + r.name, 'start')">start</button>
+                            </template>
+                            <button class="btn tiny" @click="openEdit(r)">edit</button>
+                            <button class="btn tiny" @click="regenerate(r)">retoken</button>
+                            <button class="btn tiny ghost" @click="openRaw(r.name)">toml</button>
+                            <button class="btn tiny danger" @click="remove(r)">delete</button>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+
+            <!-- create wizard -->
+            <template x-if="wiz">
+              <div class="modal-back" @keydown.escape.window="wiz = null">
+                <form class="modal" @submit.prevent="create()">
+                  <div class="modal-head"><h2>New frps instance</h2></div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Instance name</label>
+                      <input class="input mono" x-model="wiz.name" placeholder="server-7000 (auto from port)">
+                    </div>
+                    <div class="field">
+                      <label>Bind port</label>
+                      <input class="input mono" type="number" min="1" max="65535" x-model="wiz.bindPort">
+                    </div>
+                    <div class="field">
+                      <label>QUIC/KCP port (protocol)</label>
+                      <select class="select" x-model="wiz.protocol">
+                        <option value="quic">quic (recommended)</option>
+                        <option value="kcp">kcp</option>
+                        <option value="none">none — plain TCP</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field mt1">
+                    <label>Bind address</label>
+                    <select class="select mono" x-model="wiz.bindAddr">
+                      <template x-for="c in bindChoices()" :key="c.v">
+                        <option :value="c.v" x-text="c.label"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <template x-if="wiz.bindAddr === 'custom'">
+                    <div class="field mt05">
+                      <label>Custom bind address</label>
+                      <input class="input mono" x-model="wiz.customBind" placeholder="10.100.111.2">
+                    </div>
+                  </template>
+                  <div class="field-row mt1">
+                    <div class="field">
+                      <label>Auth token (32 chars, crypto-random)</label>
+                      <div class="tokfield">
+                        <input class="input mono" x-model="wiz.token" :disabled="!wiz.genToken" spellcheck="false">
+                        <button type="button" class="btn" :disabled="!wiz.genToken" @click="wiz.token = FRP.genToken()">↻</button>
+                        <button type="button" class="btn" @click="copyTok(wiz.token)">copy</button>
+                      </div>
+                      <label class="check mt05"><input type="checkbox" x-model="wiz.genToken"> generate a fresh token</label>
+                    </div>
+                  </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="wiz.tcpMux"> enable tcpMux</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.webEnabled"> metrics webServer (127.0.0.1, auto port 7500+)</label>
+                  </div>
+                  <template x-if="wiz.error"><div class="notice bad mt05"><span x-text="wiz.error"></span></div></template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="wiz = null">Cancel</button>
+                    <button type="submit" class="btn primary" :disabled="wiz.busy">Create instance</button>
+                  </div>
+                </form>
+              </div>
+            </template>
+
+            <!-- edit (managed configs) -->
+            <template x-if="edit">
+              <div class="modal-back" @keydown.escape.window="edit = null">
+                <form class="modal" @submit.prevent="saveEdit()">
+                  <div class="modal-head">
+                    <h2 x-text="'Edit frps@' + edit.name"></h2>
+                    <template x-if="edit.style !== 'managed'">
+                      <span class="pill warn" x-text="edit.style + ' — use the TOML editor'"></span>
+                    </template>
+                  </div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Bind port</label>
+                      <input class="input mono" type="number" min="1" max="65535" x-model="edit.bindPort">
+                    </div>
+                    <div class="field">
+                      <label>Protocol</label>
+                      <select class="select" x-model="edit.protocol">
+                        <option value="quic">quic</option>
+                        <option value="kcp">kcp</option>
+                        <option value="none">none — plain TCP</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field mt05">
+                    <label>Bind address</label>
+                    <select class="select mono" x-model="edit.bindAddr">
+                      <template x-for="c in bindChoices()" :key="c.v">
+                        <option :value="c.v" x-text="c.label"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <template x-if="edit.bindAddr === 'custom'">
+                    <div class="field mt05">
+                      <label>Custom bind address</label>
+                      <input class="input mono" x-model="edit.customBind">
+                    </div>
+                  </template>
+                  <div class="field mt05">
+                    <label>Auth token</label>
+                    <div class="tokfield">
+                      <input class="input mono" x-model="edit.token" spellcheck="false">
+                      <button type="button" class="btn" @click="retoken()">↻</button>
+                      <button type="button" class="btn" @click="copyTok(edit.token)">copy</button>
+                    </div>
+                  </div>
+                  <div class="row mt05">
+                    <label class="check"><input type="checkbox" x-model="edit.tcpMux"> enable tcpMux</label>
+                  </div>
+                  <template x-if="edit.error"><div class="notice bad mt05"><span x-text="edit.error"></span></div></template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
+                    <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
+                  </div>
+                </form>
+              </div>
+            </template>
+
+            <!-- raw TOML editor -->
+            <template x-if="raw">
+              <div class="modal-back" @keydown.escape.window="raw = null">
+                <div class="modal">
+                  <div class="modal-head">
+                    <h2 x-text="'TOML — frps@' + raw.name"></h2>
+                    <span class="pill" :class="raw.style === 'managed' ? 'ok' : 'warn'" x-text="raw.style"></span>
+                  </div>
+                  <textarea class="input rawedit" x-model="raw.content" spellcheck="false"></textarea>
+                  <template x-if="raw.error"><div class="notice bad mt05"><span class="mono" x-text="raw.error"></span></div></template>
+                  <template x-if="raw.saved"><div class="notice accent mt05"><span class="mono" x-text="raw.saved"></span></div></template>
+                  <div class="modal-foot">
+                    <button class="btn ghost" @click="raw = null">Close</button>
+                    <button class="btn primary" :disabled="raw.busy" @click="saveRaw()">Save (verify + .bak)</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- regenerated token -->
+            <template x-if="regen">
+              <div class="modal-back" @keydown.escape.window="regen = null">
+                <div class="modal">
+                  <div class="modal-head"><h2 x-text="'New token — frps@' + regen.name"></h2></div>
+                  <div class="tokfield">
+                    <input class="input mono" x-model="regen.token" readonly>
+                    <button class="btn" @click="copyTok(regen.token)">copy</button>
+                  </div>
+                  <p class="muted small mt05" x-show="regen.propagated.length" x-cloak
+                     x-text="'propagated to local clients: ' + regen.propagated.join(', ')"></p>
+                  <p class="muted small mt05" x-show="!regen.propagated.length" x-cloak>
+                    No local client config used the old token — remote clients must be updated by hand.
+                  </p>
+                  <div class="modal-foot">
+                    <button class="btn primary" @click="regen = null">Done</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- token shown once after create -->
+            <template x-if="once">
+              <div class="modal-back">
+                <div class="modal">
+                  <div class="modal-head"><h2 x-text="once.title"></h2></div>
+                  <p class="muted small">Copy the token now — it is the credential your clients will use.</p>
+                  <div class="tokfield">
+                    <input class="input mono" x-model="once.token" readonly>
+                    <button class="btn" @click="copyTok(once.token)">copy</button>
+                  </div>
+                  <template x-if="once.webPort">
+                    <dl class="kv mt1">
+                      <dt>metrics webServer</dt><dd x-text="'127.0.0.1:' + once.webPort"></dd>
+                      <template x-if="once.webUser"><dt>dashboard login</dt><dd x-text="once.webUser + ' / ' + (once.webPassword || '')"></dd></template>
+                    </dl>
+                  </template>
+                  <template x-if="once.note"><div class="notice warn mt05"><span x-text="once.note"></span></div></template>
+                  <p class="faint small mt05" x-text="'verify: ' + once.verify + ' · backup: ' + (once.backup || 'n/a')"></p>
+                  <div class="modal-foot">
+                    <button class="btn primary" @click="once = null">Done</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </section>
+        </template>
+
+        <!-- ================= FRP Clients ================= -->
+        <template x-if="view === 'clients'">
+          <section x-data="clientsView">
+            <div class="viewhead">
+              <div>
+                <h1>FRP Clients</h1>
+                <p>frpc instances in <span class="mono">/root/frp/client/*.toml</span>, run as <span class="mono">frpc@&lt;name&gt;</span>.</p>
+              </div>
+              <div class="grow"></div>
+              <button class="btn primary" @click="openCreate()">+ New client</button>
+            </div>
+
+            <template x-if="loading"><p class="muted">loading…</p></template>
+
+            <template x-if="!loading && !rows.length">
+              <div class="empty">
+                <div class="empty-ico">▥</div>
+                <p>No frpc instance on this node yet.</p>
+                <button class="btn primary" @click="openCreate()">Create the first client</button>
+              </div>
+            </template>
+
+            <div class="stack">
+              <template x-for="r in rows" :key="r.name">
+                <div class="card">
+                  <div class="card-head">
+                    <span class="badge cli" x-text="'frpc@' + r.name"></span>
+                    <span class="pill" :class="FRP.unitPill(r.unit.active)" x-text="r.unit.active"></span>
+                    <template x-if="r.style === 'advanced' || r.style === 'template'">
+                      <span class="pill warn" x-text="r.style + ' — raw edits only'"></span>
+                    </template>
+                    <div class="grow"></div>
+                    <span class="muted small mono" x-text="FRP.fmtAddr(r.serverAddr, r.serverPort) + ' · ' + (r.protocol || 'tcp')"></span>
+                  </div>
+
+                  <div class="row mb05">
+                    <span class="pill" :class="r.tls ? 'ok' : 'warn'" x-text="r.tls ? 'tls on' : 'tls off'"></span>
+                    <span class="pill idle" x-text="'mux ' + (r.tcpMux ? 'on' : 'off')"></span>
+                    <span class="pill idle" x-text="r.proxies.length + ' proxies'"></span>
+                    <div class="grow"></div>
+                    <div class="btn-row">
+                      <template x-if="r.unit.active === 'active'">
+                        <button class="btn tiny" @click="action('frpc@' + r.name, 'restart')">restart</button>
+                      </template>
+                      <template x-if="r.unit.active === 'active'">
+                        <button class="btn tiny" @click="action('frpc@' + r.name, 'stop')">stop</button>
+                      </template>
+                      <template x-if="r.unit.active !== 'active'">
+                        <button class="btn tiny" @click="action('frpc@' + r.name, 'start')">start</button>
+                      </template>
+                      <button class="btn tiny" @click="toggleExpand(r.name)" x-text="expanded === r.name ? 'hide ports' : 'ports'"></button>
+                      <button class="btn tiny" @click="openEdit(r)">edit</button>
+                      <button class="btn tiny ghost" @click="openRaw(r.name)">toml</button>
+                      <button class="btn tiny danger" @click="remove(r)">delete</button>
+                    </div>
+                  </div>
+
+                  <!-- proxies -->
+                  <template x-if="expanded === r.name">
+                    <div>
+                      <div class="tblwrap">
+                        <table class="tbl">
+                          <thead>
+                            <tr><th>proxy</th><th>type</th><th>local</th><th>remote port</th><th></th></tr>
+                          </thead>
+                          <tbody>
+                            <template x-for="p in r.proxies" :key="p.name">
+                              <tr>
+                                <td class="mono" x-text="p.name"></td>
+                                <td><span class="badge" :class="p.type === 'udp' ? 'udp' : 'tcp'" x-text="p.type.toUpperCase()"></span></td>
+                                <td class="mono" x-text="p.localIp + ':' + p.localPort"></td>
+                                <td class="num" x-text="p.remotePort"></td>
+                                <td><button class="btn tiny danger" @click="removeProxy(r, p)">remove</button></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <template x-if="addForm && addForm.name === r.name">
+                        <form class="card mt05" @submit.prevent="addProxies()">
+                          <div class="field-row">
+                            <div class="field">
+                              <label>Ports / ranges</label>
+                              <input class="input mono" x-model="addForm.ports" placeholder="22, 6000-6006">
+                            </div>
+                            <div class="field">
+                              <label>Emit</label>
+                              <select class="select" x-model="addForm.proto">
+                                <option value="both">TCP + UDP (paired rules)</option>
+                                <option value="tcp">TCP only</option>
+                                <option value="udp">UDP only</option>
+                              </select>
+                            </div>
+                            <div class="field">
+                              <label>Local IP</label>
+                              <input class="input mono" x-model="addForm.localIp">
+                            </div>
+                          </div>
+                          <template x-if="addForm.error"><div class="notice bad mt05"><span x-text="addForm.error"></span></div></template>
+                          <div class="row end mt05">
+                            <button type="button" class="btn ghost" @click="addForm = null">Cancel</button>
+                            <button type="submit" class="btn primary" :disabled="addForm.busy">Add rules</button>
+                          </div>
+                        </form>
+                      </template>
+                      <template x-if="!addForm || addForm.name !== r.name">
+                        <button class="btn sm mt05" @click="openAdd(r.name)">+ Add port rules</button>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <!-- create wizard -->
+            <template x-if="wiz">
+              <div class="modal-back" @keydown.escape.window="wiz = null">
+                <form class="modal" @submit.prevent="create()">
+                  <div class="modal-head"><h2>New frpc instance</h2></div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Instance name</label>
+                      <input class="input mono" x-model="wiz.name" placeholder="client-7000 (auto from port)">
+                    </div>
+                    <div class="field">
+                      <label>Server address</label>
+                      <input class="input mono" x-model="wiz.serverAddr" placeholder="10.100.111.2 or public IP">
+                    </div>
+                    <div class="field">
+                      <label>Server port</label>
+                      <input class="input mono" type="number" min="1" max="65535" x-model="wiz.serverPort">
+                    </div>
+                  </div>
+                  <div class="field mt05">
+                    <label>Auth token</label>
+                    <select class="select mono" x-model="wiz.tokenSource" @change="pickToken(wiz.tokenSource)">
+                      <template x-for="s in tokenSources()" :key="s.v">
+                        <option :value="s.v" x-text="s.label"></option>
+                      </template>
+                    </select>
+                    <template x-if="wiz.tokenSource === 'paste'">
+                      <input class="input mono mt05" x-model="wiz.token" placeholder="paste the server token" spellcheck="false">
+                    </template>
+                  </div>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>Transport protocol</label>
+                      <select class="select" x-model="wiz.protocol">
+                        <option value="tcp">tcp</option>
+                        <option value="websocket">websocket</option>
+                        <option value="quic">quic</option>
+                        <option value="kcp">kcp</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label>Local IP for proxies</label>
+                      <input class="input mono" x-model="wiz.localIp">
+                    </div>
+                  </div>
+                  <div class="field mt05">
+                    <label>Ports / ranges</label>
+                    <input class="input mono" x-model="wiz.ports" placeholder="22, 6000-6006">
+                    <span class="hint">each port emits tcp-<em>p</em> and (toggle below) udp-<em>p</em> proxies</span>
+                  </div>
+                  <div class="field mt05">
+                    <label>Protocol emission</label>
+                    <select class="select" x-model="wiz.proto">
+                      <option value="both">TCP + UDP — dual rules per port</option>
+                      <option value="tcp">TCP only</option>
+                      <option value="udp">UDP only</option>
+                    </select>
+                  </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="wiz.useTls"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.useCompression"> compression</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.tcpMux"> tcpMux</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.webEnabled"> metrics webServer (7400+)</label>
+                  </div>
+                  <p class="faint small mt05">Encryption is always on for generated proxies.</p>
+                  <template x-if="wiz.error"><div class="notice bad mt05"><span x-text="wiz.error"></span></div></template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="wiz = null">Cancel</button>
+                    <button type="submit" class="btn primary" :disabled="wiz.busy">Create instance</button>
+                  </div>
+                </form>
+              </div>
+            </template>
+
+            <!-- edit -->
+            <template x-if="edit">
+              <div class="modal-back" @keydown.escape.window="edit = null">
+                <form class="modal" @submit.prevent="saveEdit()">
+                  <div class="modal-head"><h2 x-text="'Edit frpc@' + edit.name"></h2></div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Server address</label>
+                      <input class="input mono" x-model="edit.serverAddr">
+                    </div>
+                    <div class="field">
+                      <label>Server port</label>
+                      <input class="input mono" type="number" min="1" max="65535" x-model="edit.serverPort">
+                    </div>
+                    <div class="field">
+                      <label>Transport protocol</label>
+                      <select class="select" x-model="edit.protocol">
+                        <option value="tcp">tcp</option>
+                        <option value="websocket">websocket</option>
+                        <option value="quic">quic</option>
+                        <option value="kcp">kcp</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field mt05">
+                    <label>Auth token (leave blank to keep)</label>
+                    <input class="input mono" x-model="edit.token" placeholder="unchanged" spellcheck="false">
+                  </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="edit.useTls"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="edit.useCompression"> compression</label>
+                    <label class="check"><input type="checkbox" x-model="edit.tcpMux"> tcpMux</label>
+                  </div>
+                  <template x-if="edit.error"><div class="notice bad mt05"><span x-text="edit.error"></span></div></template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
+                    <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
+                  </div>
+                </form>
+              </div>
+            </template>
+
+            <!-- raw TOML -->
+            <template x-if="raw">
+              <div class="modal-back" @keydown.escape.window="raw = null">
+                <div class="modal">
+                  <div class="modal-head">
+                    <h2 x-text="'TOML — frpc@' + raw.name"></h2>
+                    <span class="pill" :class="raw.style === 'managed' ? 'ok' : 'warn'" x-text="raw.style"></span>
+                  </div>
+                  <textarea class="input rawedit" x-model="raw.content" spellcheck="false"></textarea>
+                  <template x-if="raw.error"><div class="notice bad mt05"><span class="mono" x-text="raw.error"></span></div></template>
+                  <template x-if="raw.saved"><div class="notice accent mt05"><span class="mono" x-text="raw.saved"></span></div></template>
+                  <div class="modal-foot">
+                    <button class="btn ghost" @click="raw = null">Close</button>
+                    <button class="btn primary" :disabled="raw.busy" @click="saveRaw()">Save (verify + .bak)</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </section>
+        </template>
+
+        <!-- ================= GRE Tunnels ================= -->
+        <template x-if="view === 'gre'">
+          <section x-data="greView">
+            <div class="viewhead">
+              <div>
+                <h1>GRE Tunnels</h1>
+                <p>Kernel GRE links in <span class="mono">/root/frp/gre/*.env</span>, run as <span class="mono">gre-tunnel@&lt;name&gt;</span> — proto&nbsp;47, conntrack bypass, MSS clamped.</p>
+              </div>
+              <div class="grow"></div>
+              <button class="btn primary" @click="openCreate()">+ New tunnel</button>
+            </div>
+
+            <template x-if="loading"><p class="muted">loading…</p></template>
+
+            <template x-if="!loading && !tunnels.length">
+              <div class="empty">
+                <div class="empty-ico">⇄</div>
+                <p>No tunnel defined on this node. Create one here, then copy the mirror config to the peer VPS.</p>
+                <button class="btn primary" @click="openCreate()">Create the first tunnel</button>
+              </div>
+            </template>
+
+            <div class="grid grid-2">
+              <template x-for="t in tunnels" :key="t.name">
+                <div class="svc">
+                  <div class="svc-top">
+                    <span class="pill" :class="FRP.unitPill(t.status.unitActive)"><span class="dot"></span><span x-text="t.status.unitActive"></span></span>
+                    <span class="svc-name" x-text="t.iface"></span>
+                    <div class="grow"></div>
+                    <span class="pill" :class="t.status.ifaceUp ? 'ok' : 'idle'" x-text="t.status.ifaceUp ? 'iface up' : 'iface down'"></span>
+                  </div>
+                  <dl class="kv">
+                    <dt>local</dt><dd x-text="t.local_public_ip + ' → ' + t.local_private_ip"></dd>
+                    <dt>remote</dt><dd x-text="t.remote_public_ip + ' → ' + t.remote_private_ip"></dd>
+                    <dt>mtu / mss</dt><dd x-text="t.mtu + ' / ' + t.mss_mode"></dd>
+                    <dt>rx / tx</dt>
+                    <dd>
+                      <span x-text="FRP.fmtBytes(t.status.rxBytes) + ' / ' + FRP.fmtBytes(t.status.txBytes)"></span>
+                      <span class="faint" x-text="' (' + t.status.rxPackets + '/' + t.status.txPackets + ' pkts)'"></span>
+                    </dd>
+                  </dl>
+                  <div class="svc-actions">
+                    <button class="btn tiny" @click="linkTest(t)">link test</button>
+                    <button class="btn tiny" @click="openMirror(t)">mirror config</button>
+                    <button class="btn tiny danger" @click="remove(t)">delete</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <template x-if="Object.keys(unreadable).length">
+              <div class="notice warn mt1">
+                <span class="mono small" x-text="'unreadable env files: ' + Object.keys(unreadable).join(', ')"></span>
+              </div>
+            </template>
+
+            <!-- create form -->
+            <template x-if="form">
+              <div class="modal-back" @keydown.escape.window="form = null">
+                <form class="modal" @submit.prevent="create()">
+                  <div class="modal-head"><h2>New GRE tunnel</h2></div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Tunnel / interface name</label>
+                      <input class="input mono" x-model="form.name" placeholder="gt11">
+                    </div>
+                    <div class="field">
+                      <label>MTU</label>
+                      <input class="input mono" type="number" x-model="form.mtu">
+                    </div>
+                    <div class="field">
+                      <label>MSS mode</label>
+                      <select class="select" x-model="form.mssMode">
+                        <option value="clamp">clamp to pmtu (recommended)</option>
+                        <option value="1360">set-mss 1360</option>
+                        <option value="1240">set-mss 1240</option>
+                        <option value="1220">set-mss 1220</option>
+                        <option value="off">off</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>This node — public IP</label>
+                      <input class="input mono" x-model="form.localPublicIp" placeholder="1.2.3.4">
+                    </div>
+                    <div class="field">
+                      <label>Peer node — public IP</label>
+                      <input class="input mono" x-model="form.remotePublicIp" placeholder="5.6.7.8">
+                    </div>
+                  </div>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>This node — private IP (CIDR)</label>
+                      <input class="input mono" x-model="form.localPrivateIp" placeholder="auto — e.g. 10.100.111.1/30">
+                    </div>
+                    <div class="field">
+                      <label>Peer node — private IP (CIDR)</label>
+                      <input class="input mono" x-model="form.remotePrivateIp" placeholder="auto — e.g. 10.100.111.2/30">
+                    </div>
+                  </div>
+                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair.</p>
+                  <template x-if="form.error"><div class="notice bad mt05"><span x-text="form.error"></span></div></template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="form = null">Cancel</button>
+                    <button type="submit" class="btn primary" :disabled="form.busy">Create tunnel</button>
+                  </div>
+                </form>
+              </div>
+            </template>
+
+            <!-- link test -->
+            <template x-if="test">
+              <div class="modal-back" @keydown.escape.window="test = null">
+                <div class="modal">
+                  <div class="modal-head"><h2 x-text="'Link test — ' + test.name"></h2></div>
+                  <template x-if="test.running"><p class="muted">pinging the peer through the tunnel (3 probes)…</p></template>
+                  <template x-if="test.result && !test.result.error">
+                    <div>
+                      <div class="row mb05">
+                        <span class="pill" :class="test.result.reachable ? 'ok' : 'bad'"
+                              x-text="test.result.reachable ? 'peer reachable' : 'peer unreachable'"></span>
+                        <template x-if="test.result.rtt_ms !== undefined">
+                          <span class="pill accent" x-text="'avg ' + FRP.fmtRtt(test.result.rtt_ms)"></span>
+                        </template>
+                        <template x-if="test.result.loss_pct !== undefined">
+                          <span class="pill" :class="test.result.loss_pct > 0 ? 'warn' : 'ok'" x-text="test.result.loss_pct + '% loss'"></span>
+                        </template>
+                      </div>
+                      <dl class="kv">
+                        <dt>through</dt><dd x-text="test.result.iface + ' → ' + test.result.peer"></dd>
+                        <dt>rx / tx</dt><dd x-text="FRP.fmtBytes(test.result.rx_bytes) + ' / ' + FRP.fmtBytes(test.result.tx_bytes)"></dd>
+                      </dl>
+                      <pre class="logpane mt05" x-text="test.result.output"></pre>
+                    </div>
+                  </template>
+                  <template x-if="test.result && test.result.error">
+                    <div class="notice bad"><span x-text="test.result.error"></span></div>
+                  </template>
+                  <div class="modal-foot">
+                    <button class="btn primary" @click="test = null">Close</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- mirror config -->
+            <template x-if="mirror">
+              <div class="modal-back" @keydown.escape.window="mirror = null">
+                <div class="modal">
+                  <div class="modal-head">
+                    <h2 x-text="'Mirror config — ' + mirror.name"></h2>
+                    <div class="grow"></div>
+                    <button class="btn" @click="copyMirror()">copy</button>
+                  </div>
+                  <p class="muted small">Save this as the peer node's tunnel definition — the same six fields, local/remote swapped.</p>
+                  <pre class="logpane" x-text="mirror.env"></pre>
+                  <div class="modal-foot">
+                    <button class="btn primary" @click="mirror = null">Done</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </section>
+        </template>
+
+        <!-- ================= Turbo ================= -->
+        <template x-if="view === 'turbo'">
+          <section x-data="turboView">
+            <div class="viewhead">
+              <div>
+                <h1>Turbo</h1>
+                <p>Persistent kernel tuning for long-haul tunnels — BBR + fq, deep socket buffers, ZRAM swap.</p>
+              </div>
+            </div>
+
+            <template x-if="!state"><p class="muted">reading kernel state…</p></template>
+
+            <div class="grid grid-2">
+              <template x-if="state">
+                <div class="card">
+                  <div class="card-head">
+                    <h2>Kernel tuning</h2>
+                    <div class="grow"></div>
+                    <span class="pill" :class="state.dropin === 'installed' ? 'ok' : 'idle'" x-text="'drop-in ' + state.dropin"></span>
+                  </div>
+                  <div class="row mb05">
+                    <span class="pill" :class="FRP.unitPill(state.units['tunnel-turbo'].active)">
+                      <span class="dot"></span><span x-text="'tunnel-turbo ' + state.units['tunnel-turbo'].active"></span>
+                    </span>
+                    <span class="pill idle" x-text="'boot: ' + state.units['tunnel-turbo'].enabled"></span>
+                  </div>
+                  <template x-if="sysctlRows.length">
+                    <div class="tblwrap">
+                      <table class="tbl">
+                        <thead><tr><th>live sysctl</th><th class="num">value</th></tr></thead>
+                        <tbody>
+                          <template x-for="row in sysctlRows" :key="row.k">
+                            <tr>
+                              <td class="mono" x-text="row.k"></td>
+                              <td class="num" x-text="row.v"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                  <template x-if="!sysctlRows.length">
+                    <p class="muted small">No live values yet — the frp-turbo helper appears after the first apply.</p>
+                  </template>
+                  <div class="btn-row mt1">
+                    <button class="btn okbtn" :disabled="busy" @click="apply()">Apply turbo</button>
+                    <button class="btn danger" :disabled="busy" @click="revert()">Revert</button>
+                  </div>
+                  <p class="faint small mt05">TCP+UDP GC cron for frps/frpc is preserved inside the drop-in apply path.</p>
+                </div>
+              </template>
+
+              <template x-if="state">
+                <div class="card">
+                  <div class="card-head">
+                    <h2>ZRAM swap</h2>
+                    <div class="grow"></div>
+                    <template x-if="zramActive">
+                      <span class="pill ok"><span class="dot live"></span><span x-text="'active · prio ' + zramActive.priority"></span></span>
+                    </template>
+                    <template x-if="!zramActive">
+                      <span class="pill idle">not active</span>
+                    </template>
+                  </div>
+                  <template x-if="zramConfig">
+                    <dl class="kv">
+                      <dt>configured</dt><dd x-text="zramConfig.SizeMB + ' MB · ' + zramConfig.Algo"></dd>
+                      <template x-if="zramActive">
+                        <dt>live</dt><dd x-text="zramActive.name + ' · ' + fmtBytes(zramActive.size_bytes) + ' (' + fmtBytes(zramActive.used_bytes) + ' used)'"></dd>
+                      </template>
+                    </dl>
+                  </template>
+                  <template x-if="!zramConfig">
+                    <p class="muted small">ZRAM is not configured on this node yet.</p>
+                  </template>
+                  <div class="field-row mt1">
+                    <div class="field">
+                      <label>Size (MB)</label>
+                      <select class="select mono" x-model.number="zramSize">
+                        <template x-for="s in zramSizes" :key="s">
+                          <option :value="s" x-text="s + ' MB'"></option>
+                        </template>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label>Algorithm</label>
+                      <select class="select mono" x-model="zramAlgo">
+                        <template x-for="a in zramAlgos" :key="a">
+                          <option :value="a" x-text="a"></option>
+                        </template>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="row mt1">
+                    <button class="btn okbtn" :disabled="busy" @click="zramOn()">Enable ZRAM</button>
+                    <button class="btn danger" :disabled="busy || !zramActive" @click="zramOff()">Disable</button>
+                    <span class="pill idle" :class="FRP.unitPill(state.units['frp-zram'].active)" x-text="'frp-zram ' + state.units['frp-zram'].active"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </section>
+        </template>
+
+        <!-- ================= Logs ================= -->
+        <template x-if="view === 'logs'">
+          <section x-data="logsView">
+            <div class="viewhead">
+              <div>
+                <h1>Logs</h1>
+                <p>Live <span class="mono">journalctl -f</span> over SSE — suite units only, strictly whitelisted server-side.</p>
+              </div>
+            </div>
+
+            <div class="logbar">
+              <div class="field">
+                <label>Unit</label>
+                <select class="select mono" x-model="unit" :disabled="!units.length" @change="restart()">
+                  <template x-for="u in units" :key="u">
+                    <option :value="u" x-text="u"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="field">
+                <label>Tail lines</label>
+                <select class="select mono" x-model.number="lines" @change="restart()">
+                  <template x-for="n in lineOpts" :key="n">
+                    <option :value="n" x-text="n"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="field">
+                <label>Filter</label>
+                <select class="select" x-model="$store.logs.filter">
+                  <option value="all">all lines</option>
+                  <option value="warn">warnings + errors</option>
+                  <option value="error">errors only</option>
+                </select>
+              </div>
+              <div class="grow"></div>
+              <template x-if="started">
+                <button class="btn" :class="$store.logs.paused ? 'primary' : ''" @click="$store.logs.paused = !$store.logs.paused"
+                        x-text="$store.logs.paused ? '▶ resume' : '⏸ pause'"></button>
+              </template>
+              <button class="btn" @click="clear()">clear</button>
+              <label class="check"><input type="checkbox" x-model="$store.logs.follow"> follow</label>
+            </div>
+
+            <!-- htmx sse transport (hidden): the extension owns the
+                 EventSource; app.js taps payloads directly from it. -->
+            <div x-ref="stream" class="hidden" hx-ext="sse">
+              <div sse-swap="message,open,eof,overflow" hx-swap="none"></div>
+            </div>
+
+            <div class="logpane" x-ref="pane" role="log" aria-live="polite"
+                 @scroll="$store.logs.follow = ($el.scrollTop + $el.clientHeight) > ($el.scrollHeight - 60)"
+                 x-effect="$store.logs.lines.length; scrollEnd()">
+              <template x-if="store.streamNote">
+                <div class="streamnote" x-text="store.streamNote"></div>
+              </template>
+              <template x-for="(l, i) in store.visible()" :key="i">
+                <div class="ln" :class="l.cls"><span class="ts" x-text="l.ts"></span><span x-text="l.text"></span></div>
+              </template>
+              <template x-if="!store.lines.length">
+                <div class="streamnote" x-text="started ? 'waiting for log lines…' : 'no unit selected — create an instance first.'"></div>
+              </template>
+            </div>
+
+            <div class="row mt05">
+              <span class="pill" :class="store.connected ? 'ok' : 'warn'">
+                <span class="dot" :class="{ live: store.connected }"></span>
+                <span x-text="store.connected ? 'streaming' : 'disconnected'"></span>
+              </span>
+              <span class="pill idle" x-text="store.lines.length + ' lines buffered'"></span>
+              <span class="pill idle" x-text="'paused — ' + $store.logs.paused"></span>
+            </div>
+          </section>
+        </template>
+
+        <!-- ================= Stats ================= -->
+        <template x-if="view === 'stats'">
+          <section x-data="statsView">
+            <div class="viewhead">
+              <div>
+                <h1>Stats</h1>
+                <p>Scraped from each instance's FRP webServer — active connections and per-proxy traffic, with a 24&nbsp;h history.</p>
+              </div>
+              <div class="grow"></div>
+              <select class="select mono" x-model="selected" @change="renderChart()">
+                <template x-for="i in instances" :key="i.name">
+                  <option :value="i.name" x-text="i.name + ' (' + i.kind + ')'"></option>
+                </template>
+              </select>
+            </div>
+
+            <template x-if="loading"><p class="muted">loading…</p></template>
+
+            <template x-if="!loading && !instances.length">
+              <div class="empty">
+                <div class="empty-ico">∿</div>
+                <p>No instance reports metrics yet. Stats appear once an frps/frpc with its webServer block is running.</p>
+              </div>
+            </template>
+
+            <template x-if="cur">
+              <div class="stack">
+                <div class="statgrid">
+                  <div class="stat">
+                    <div class="stat-label">status</div>
+                    <div class="stat-value">
+                      <span class="pill" :class="cur.up ? 'ok' : 'bad'" x-text="cur.up ? 'up' : 'down'"></span>
+                    </div>
+                    <div class="stat-sub mono" x-text="cur.error || (cur.version ? 'frp ' + cur.version : '')"></div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">connections</div>
+                    <div class="stat-value" x-text="cur.cur_conns"></div>
+                    <div class="stat-sub" x-show="cur.kind === 'server'" x-text="'clients: ' + (cur.client_counts || 0)"></div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">traffic in</div>
+                    <div class="stat-value" x-text="fmtBytes(cur.total_traffic_in)"></div>
+                    <div class="stat-sub">total</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">traffic out</div>
+                    <div class="stat-value" x-text="fmtBytes(cur.total_traffic_out)"></div>
+                    <div class="stat-sub">total</div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="card-head"><h2 x-text="'24 h traffic — ' + cur.name"></h2></div>
+                  <template x-if="curHistory.length">
+                    <div class="chart" x-ref="chart"></div>
+                  </template>
+                  <template x-if="!curHistory.length">
+                    <p class="muted small">History builds up here at one sample per minute — check back shortly.</p>
+                  </template>
+                </div>
+
+                <div class="card">
+                  <div class="card-head"><h2>Proxies</h2></div>
+                  <template x-if="!cur.proxies.length">
+                    <p class="muted small">No proxies registered on this instance.</p>
+                  </template>
+                  <template x-if="cur.proxies.length">
+                    <div class="tblwrap">
+                      <table class="tbl">
+                        <thead>
+                          <tr><th>proxy</th><th>type</th><th>status</th><th class="num">conns</th><th class="num">today in</th><th class="num">today out</th></tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="p in cur.proxies" :key="p.name">
+                            <tr>
+                              <td class="mono" x-text="p.name"></td>
+                              <td><span class="badge" :class="p.type === 'udp' ? 'udp' : 'tcp'" x-text="p.type.toUpperCase()"></span></td>
+                              <td>
+                                <span class="pill" :class="p.status === 'running' ? 'ok' : 'warn'" x-text="p.status"></span>
+                                <template x-if="p.err"><span class="faint small" x-text="p.err"></span></template>
+                              </td>
+                              <td class="num" x-text="p.cur_conns"></td>
+                              <td class="num" x-text="fmtBytes(p.today_traffic_in)"></td>
+                              <td class="num" x-text="fmtBytes(p.today_traffic_out)"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </section>
+        </template>
+
+        <!-- ================= Backup ================= -->
+        <template x-if="view === 'backup'">
+          <section x-data="backupView">
+            <div class="viewhead">
+              <div>
+                <h1>Backup &amp; restore</h1>
+                <p>ZIP snapshots of the suite's state. Redacted exports regenerate fresh secrets on restore.</p>
+              </div>
+            </div>
+
+            <div class="grid grid-2">
+              <div class="card">
+                <div class="card-head"><h2>Export</h2></div>
+                <p class="muted small">
+                  Contains FRP TOMLs, GRE envs, systemd units and turbo files. Without secrets,
+                  <span class="mono">auth.token</span> / webServer passwords are replaced by
+                  <span class="mono">REDACTED</span> and panel credentials are excluded — a restore
+                  regenerates fresh random values.
+                </p>
+                <label class="check mt05">
+                  <input type="checkbox" x-model="includeSecrets">
+                  include secrets (tokens, webServer passwords, panel.toml)
+                </label>
+                <button class="btn primary mt1" :disabled="exporting" @click="doExport()">
+                  <span x-text="exporting ? 'packing…' : '⤓ Download backup ZIP'"></span>
+                </button>
+              </div>
+
+              <div class="card">
+                <div class="card-head"><h2>Restore</h2></div>
+                <div class="dropzone" :class="{ over: overDrag }"
+                     @click="$refs.file.click()"
+                     @dragover.prevent="overDrag = true"
+                     @dragleave="overDrag = false"
+                     @drop.prevent="onDrop($event)">
+                  <template x-if="!file">
+                    <div>
+                      <p>Drop a backup .zip here, or click to choose.</p>
+                      <p class="faint small">validated in full before anything is written</p>
+                    </div>
+                  </template>
+                  <template x-if="file">
+                    <p><span class="mono" x-text="file.name"></span> — <span x-text="FRP.fmtBytes(file.size)"></span></p>
+                  </template>
+                  <input x-ref="file" type="file" accept=".zip" class="hidden" @change="pickFile($event)">
+                </div>
+
+                <p class="navgroup-label mt1">categories to restore</p>
+                <div class="row">
+                  <template x-for="c in categories" :key="c.id">
+                    <label class="check" :title="c.hint">
+                      <input type="checkbox" x-model="c.on">
+                      <span x-text="c.label"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="row mt05">
+                  <label class="check"><input type="checkbox" x-model="restartAfter"> restart affected active units</label>
+                  <label class="check"><input type="checkbox" x-model="regenerate"> regenerate redacted secrets</label>
+                </div>
+
+                <button class="btn primary mt1" :disabled="!file || importing" @click="doImport()">
+                  <span x-text="importing ? 'restoring…' : 'Restore from ZIP'"></span>
+                </button>
+
+                <template x-if="error"><div class="notice bad mt05"><span x-text="error"></span></div></template>
+
+                <template x-if="result">
+                  <div class="mt1">
+                    <div class="notice accent">
+                      <span x-text="Object.keys(result.summary.restored || {}).length + ' files restored · ' + (result.summary.backups || []).length + ' backups taken'"></span>
+                    </div>
+                    <template x-if="result.summary.regenerated && result.summary.regenerated.length">
+                      <p class="muted small mt05" x-text="'fresh secrets regenerated in: ' + result.summary.regenerated.join(', ')"></p>
+                    </template>
+                    <template x-if="result.notes && result.notes.length">
+                      <div class="stack mt05">
+                        <template x-for="(n, i) in result.notes" :key="i">
+                          <div class="notice warn"><span x-text="n"></span></div>
+                        </template>
+                      </div>
+                    </template>
+                    <details class="mt05">
+                      <summary class="muted small">restored file list</summary>
+                      <div class="tblwrap mt05">
+                        <table class="tbl">
+                          <tbody>
+                            <template x-for="e in restoredEntries()" :key="e.entry">
+                              <tr><td class="mono" x-text="e.entry"></td><td class="mono muted" x-text="e.path"></td></tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </section>
+        </template>
+
+        <!-- ================= Watchdog ================= -->
+        <template x-if="view === 'watchdog'">
+          <section x-data="watchdogView">
+            <div class="viewhead">
+              <div>
+                <h1>Watchdog</h1>
+                <p>Auto-heal loop: GRE peer pings and frpc control probes restart failed units after N strikes.</p>
+              </div>
+            </div>
+
+            <div class="grid grid-2">
+              <template x-if="form">
+                <div class="card">
+                  <div class="card-head">
+                    <h2>Configuration</h2>
+                    <div class="grow"></div>
+                    <template x-if="state && state.unit">
+                      <span class="pill" :class="FRP.unitPill(state.unit.active)" x-text="'frp-watchdog ' + state.unit.active"></span>
+                    </template>
+                  </div>
+                  <div class="row mb05">
+                    <label class="switch">
+                      <input type="checkbox" x-model="form.enabled">
+                      <span class="track"></span>
+                      <span x-text="form.enabled ? 'enabled' : 'disabled'"></span>
+                    </label>
+                  </div>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Check interval (s)</label>
+                      <input class="input mono" type="number" min="10" x-model.number="form.interval">
+                    </div>
+                    <div class="field">
+                      <label>Failures before restart</label>
+                      <input class="input mono" type="number" min="1" x-model.number="form.threshold">
+                    </div>
+                    <div class="field">
+                      <label>Cooldown (s)</label>
+                      <input class="input mono" type="number" min="0" x-model.number="form.cooldown">
+                    </div>
+                  </div>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>Ping timeout (s)</label>
+                      <input class="input mono" type="number" min="1" x-model.number="form.pingTimeout">
+                    </div>
+                    <div class="field">
+                      <label>TCP probe timeout (s)</label>
+                      <input class="input mono" type="number" min="1" x-model.number="form.tcpTimeout">
+                    </div>
+                  </div>
+                  <p class="faint small mt05">Values merge over the current env; invalid entries are rejected, never silently defaulted.</p>
+                  <button class="btn primary mt1" :disabled="busy" @click="save()">Save &amp; apply</button>
+                </div>
+              </template>
+
+              <div class="card">
+                <div class="card-head">
+                  <h2>Heal events</h2>
+                  <div class="grow"></div>
+                  <span class="pill idle" x-text="events.length + ' recent'"></span>
+                </div>
+                <template x-if="!events.length">
+                  <p class="muted small">Nothing healed (or broken) so far — the log lives in <span class="mono">/var/log/frp-panel/watchdog.log</span>.</p>
+                </template>
+                <template x-if="events.length">
+                  <pre class="logpane" x-text="events.join('\n')"></pre>
+                </template>
+              </div>
+            </div>
+          </section>
+        </template>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- ============ confirm dialog (shared) ============ -->
+  <template x-if="$store.ui.confirmState.open">
+    <div class="modal-back" @keydown.escape.window="$store.ui.answer(false)">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head"><h2 x-text="$store.ui.confirmState.title"></h2></div>
+        <p class="muted" x-text="$store.ui.confirmState.message"></p>
+        <div class="modal-foot">
+          <button class="btn ghost" @click="$store.ui.answer(false)">Cancel</button>
+          <button class="btn" :class="$store.ui.confirmState.danger ? 'danger' : 'primary'"
+                  @click="$store.ui.answer(true)" x-text="$store.ui.confirmState.confirmText"></button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ============ toasts ============ -->
+  <div class="toasts" role="status" aria-live="polite">
+    <template x-for="t in $store.ui.toasts" :key="t.id">
+      <div class="toast" :class="t.kind">
+        <span class="t-ico" x-text="t.kind === 'ok' ? '✓' : (t.kind === 'warn' ? '⚠' : '✕')"></span>
+        <span x-text="t.msg"></span>
+        <button class="iconbtn" @click="$store.ui.dismiss(t.id)">×</button>
+      </div>
+    </template>
+  </div>
+
+</body>
+</html>

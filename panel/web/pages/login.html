@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FRP Panel — Sign in</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="data:,">
+  <!-- htmx: no indicator <style> injection (kept CSP-clean: style-src 'self') -->
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <script src="/static/js/vendor/htmx.min.js" defer></script>
+  <script src="/static/js/vendor/htmx-sse.min.js" defer></script>
+  <script src="/static/js/vendor/uPlot.min.js" defer></script>
+  <!-- app.js must load before Alpine: it registers the alpine:init
+       component factories, and Alpine may start as soon as it loads -->
+  <script src="/static/js/app.js" defer></script>
+  <script src="/static/js/vendor/alpine.min.js" defer></script>
+</head>
+<body class="login-page" x-data="loginPage" x-cloak>
+  <main>
+    <div class="card login-card" :class="{ 'login-shake': shakeOn }">
+      <div class="brand">
+        <div class="brand-mark">⇄</div>
+        <div>
+          <div class="brand-name">FRP Panel</div>
+          <div class="brand-sub">Tunnel &amp; FRP Management Suite</div>
+        </div>
+      </div>
+
+      <!-- step: session check -->
+      <template x-if="step === 'checking'">
+        <p class="muted">Checking your session…</p>
+      </template>
+
+      <!-- step: credentials -->
+      <template x-if="step === 'form'">
+        <form class="stack" @submit.prevent="login">
+          <p class="muted small">
+            First run prints a one-time admin password to the server console:
+            <span class="mono">journalctl -u frp-panel | grep -i password</span>
+          </p>
+          <div class="field">
+            <label for="f-user">Username</label>
+            <input id="f-user" class="input mono" type="text" x-model="username" autocomplete="username" spellcheck="false">
+          </div>
+          <div class="field">
+            <label for="f-pass">Password</label>
+            <input id="f-pass" class="input mono" type="password" x-model="password" autocomplete="current-password">
+          </div>
+          <template x-if="error">
+            <div class="notice bad">
+              <span x-text="error"></span>
+              <template x-if="lockLeft > 0">
+                <span class="countdown">— retry in <span x-text="lockLeft"></span>s</span>
+              </template>
+            </div>
+          </template>
+          <button class="btn primary" type="submit" :disabled="busy || lockLeft > 0">
+            <span x-show="!busy">Sign in</span>
+            <span x-show="busy" x-cloak>Signing in…</span>
+          </button>
+        </form>
+      </template>
+
+      <!-- step: forced password change -->
+      <template x-if="step === 'change'">
+        <form class="stack" @submit.prevent="changePassword">
+          <h2>Set a new password</h2>
+          <p class="muted small">
+            This is the first login with the one-time password — choose a
+            replacement (at least 10 characters) to continue.
+          </p>
+          <div class="field">
+            <label for="f-cur">Current (one-time) password</label>
+            <input id="f-cur" class="input mono" type="password" x-model="password" autocomplete="current-password">
+          </div>
+          <div class="field">
+            <label for="f-new">New password</label>
+            <input id="f-new" class="input mono" type="password" x-model="newPassword" autocomplete="new-password">
+            <span class="hint">minimum 10 characters</span>
+          </div>
+          <div class="field">
+            <label for="f-new2">Repeat new password</label>
+            <input id="f-new2" class="input mono" type="password" x-model="confirm2" autocomplete="new-password">
+          </div>
+          <template x-if="changeError">
+            <div class="notice bad"><span x-text="changeError"></span></div>
+          </template>
+          <button class="btn primary" type="submit" :disabled="busy">
+            <span x-show="!busy">Save password and continue</span>
+            <span x-show="busy" x-cloak>Saving…</span>
+          </button>
+        </form>
+      </template>
+    </div>
+  </main>
+</body>
+</html>

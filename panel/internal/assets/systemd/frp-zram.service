@@ -1,0 +1,14 @@
+[Unit]
+Description=FRP Tunnel Suite ZRAM swap
+Documentation=file:///usr/local/bin/frp-turbo
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/frp-turbo zram-on
+ExecStop=/usr/local/bin/frp-turbo zram-off
+
+[Install]
+WantedBy=multi-user.target

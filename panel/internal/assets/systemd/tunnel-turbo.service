@@ -1,0 +1,14 @@
+[Unit]
+Description=FRP Tunnel Suite Turbo (BBR + fq + sysctl tuning)
+Documentation=file:///usr/local/bin/frp-turbo
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/frp-turbo apply
+ExecStop=/usr/local/bin/frp-turbo revert
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=FRP Tunnel Suite Web Panel
+Documentation=https://gofrp.org/en/docs/overview/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/frp-panel serve --config /etc/frp-panel/panel.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+# Hardening: root is required for /root/frp, systemctl, ip and sysctl,
+# everything else is locked down as far as systemd allows.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/root/frp /etc/frp-panel /etc/sysctl.d /etc/systemd/system /usr/local/bin /var/log/frp-panel
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

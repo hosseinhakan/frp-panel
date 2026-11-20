@@ -1,0 +1,125 @@
+#!/bin/bash
+# frp-turbo — persistent kernel/network tuning for the FRP Tunnel Suite.
+# Applies BBR + fq + high-throughput sysctls via a sysctl drop-in, ensures the
+# frp GC cron, and manages optional ZRAM (lz4) + swappiness tuning.
+# Canonical copy: panel/internal/assets/helpers/frp-turbo (also embedded in frp-panel).
+#
+# Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status
+set -euo pipefail
+
+SYSCTL_DROPIN="/etc/sysctl.d/99-tunnel-turbo.conf"
+ZRAM_SYSCTL="/etc/sysctl.d/99-frp-zram.conf"
+BBR_MODULE_FILE="/etc/modules-load.d/bbr.conf"
+ZRAM_ENV="/etc/frp-panel/zram.env"
+GC_CRON="0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps"
+
+usage() {
+    echo "usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status" >&2
+    exit 2
+}
+
+write_dropin() {
+    mkdir -p /etc/sysctl.d
+    cat > "$SYSCTL_DROPIN" <<'TURBO_SYSCTL'
+# /etc/sysctl.d/99-tunnel-turbo.conf — applied by frp-turbo (FRP Tunnel Suite)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_base_mss = 1024
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.core.somaxconn = 65535
+net.ipv4.ip_forward = 1
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_fastopen = 3
+TURBO_SYSCTL
+}
+
+ensure_gc_cron() {
+    crontab -l 2>/dev/null | grep -Fq "$GC_CRON" && return 0
+    (crontab -l 2>/dev/null; echo "$GC_CRON") | crontab -
+}
+
+cmd_apply() {
+    mkdir -p /etc/modules-load.d
+    write_dropin
+    echo "tcp_bbr" > "$BBR_MODULE_FILE"
+    modprobe tcp_bbr 2>/dev/null || true
+    sysctl --system >/dev/null
+    ensure_gc_cron
+    echo "frp-turbo: applied BBR + fq + tunnel sysctls ($SYSCTL_DROPIN); GC cron ensured"
+    cmd_status
+}
+
+cmd_revert() {
+    rm -f "$SYSCTL_DROPIN"
+    sysctl --system >/dev/null
+    echo "frp-turbo: removed $SYSCTL_DROPIN (kernel keeps current values until reboot)"
+}
+
+cmd_status() {
+    local q cc bmss rmax wmax somax fwd dropin
+    q="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
+    bmss="$(sysctl -n net.ipv4.tcp_base_mss 2>/dev/null || echo '?')"
+    rmax="$(sysctl -n net.core.rmem_max 2>/dev/null || echo '?')"
+    wmax="$(sysctl -n net.core.wmem_max 2>/dev/null || echo '?')"
+    somax="$(sysctl -n net.core.somaxconn 2>/dev/null || echo '?')"
+    fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+    [[ -f "$SYSCTL_DROPIN" ]] && dropin="installed" || dropin="missing"
+    printf 'frp-turbo: qdisc=%s cc=%s tcp_base_mss=%s rmem_max=%s wmem_max=%s somaxconn=%s ip_forward=%s dropin=%s\n' \
+        "$q" "$cc" "$bmss" "$rmax" "$wmax" "$somax" "$fwd" "$dropin"
+}
+
+cmd_zram_on() {
+    mkdir -p /etc/frp-panel
+    ZRAM_SIZE_MB=""; ZRAM_ALGO=""
+    # shellcheck disable=SC1090
+    [[ -r "$ZRAM_ENV" ]] && source "$ZRAM_ENV"
+    ZRAM_SIZE_MB="${ZRAM_SIZE_MB:-2048}"
+    ZRAM_ALGO="${ZRAM_ALGO:-lz4}"
+
+    [[ -e /sys/block/zram0 ]] || modprobe zram
+    [[ -e /sys/block/zram0 ]] || { echo "frp-turbo: zram module unavailable" >&2; exit 1; }
+
+    if swapon --noheadings --show=NAME 2>/dev/null | grep -q zram; then
+        echo "frp-turbo: zram0 swap already active"
+        return 0
+    fi
+    if ! grep -q "\b$ZRAM_ALGO\b" /sys/block/zram0/comp_algorithm 2>/dev/null; then
+        echo "frp-turbo: algorithm '$ZRAM_ALGO' unavailable, falling back to lzo" >&2
+        ZRAM_ALGO=lzo
+    fi
+    echo "$ZRAM_ALGO" > /sys/block/zram0/comp_algorithm
+    echo $(( ZRAM_SIZE_MB * 1024 * 1024 )) > /sys/block/zram0/disksize
+    mkswap /dev/zram0 >/dev/null
+    swapon -p 100 /dev/zram0
+    printf 'vm.swappiness = 10\n' > "$ZRAM_SYSCTL"
+    sysctl --system >/dev/null
+    echo "frp-turbo: zram0 swap on — ${ZRAM_SIZE_MB}MB ${ZRAM_ALGO}, priority 100, swappiness 10"
+}
+
+cmd_zram_off() {
+    swapoff /dev/zram0 >/dev/null 2>&1 || true
+    echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+    rm -f "$ZRAM_SYSCTL"
+    sysctl --system >/dev/null
+    echo "frp-turbo: zram0 swap off"
+}
+
+cmd_zram_status() {
+    swapon --noheadings --show=NAME,SIZE,USED,PRIORITY 2>/dev/null | grep zram \
+        || echo "frp-turbo: no zram swap active"
+}
+
+case "${1:-}" in
+    apply) cmd_apply ;;
+    revert) cmd_revert ;;
+    status) cmd_status ;;
+    zram-on) cmd_zram_on ;;
+    zram-off) cmd_zram_off ;;
+    zram-status) cmd_zram_status ;;
+    *) usage ;;
+esac

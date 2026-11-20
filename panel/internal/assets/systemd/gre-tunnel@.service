@@ -1,0 +1,15 @@
+[Unit]
+Description=GRE tunnel %i (FRP Tunnel Suite)
+Documentation=file:///root/frp/gre/%i.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/frp-gre up %i
+ExecStop=/usr/local/bin/frp-gre down %i
+ExecReload=/usr/local/bin/frp-gre reload %i
+
+[Install]
+WantedBy=multi-user.target

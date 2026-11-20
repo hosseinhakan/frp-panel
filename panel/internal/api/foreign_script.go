@@ -123,7 +123,7 @@ func (s *Server) handleServerForeignScript(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_, script, err := buildForeignScript(t, serverAddr, cfg.BindPort, token, clientProto, foreignScriptOptions{
+	clientCfg, script, err := buildForeignScript(t, serverAddr, cfg.BindPort, token, clientProto, foreignScriptOptions{
 		Ports:      req.Ports,
 		Proto:      req.Proto,
 		LocalIP:    req.LocalIP,
@@ -133,6 +133,10 @@ func (s *Server) handleServerForeignScript(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
+	}
+	enc := false
+	if len(clientCfg.Proxies) > 0 {
+		enc = clientCfg.Proxies[0].Transport.UseEncryption
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -150,6 +154,8 @@ func (s *Server) handleServerForeignScript(w http.ResponseWriter, r *http.Reques
 		"ports":            req.Ports,
 		"proto":            req.Proto,
 		"rawSpeed":         req.RawSpeed,
+		"tls":              clientCfg.Transport.TLS.Enable,
+		"encryption":       enc,
 		"linkedTunnel":     linked,
 		"script":           script,
 	})
@@ -197,6 +203,24 @@ func (s *Server) resolveForeignTunnel(req *foreignScriptReq, bindAddr string) (g
 			mss = linkedTunnel.MSSMode
 		}
 	}
+
+	// No linked tunnel: allocate the next free gtNN + 10.100.<n>.0/30 so the
+	// generated command always has a collision-free pair, exactly like the
+	// Iran wizard does on a busy host.
+	autoOctet := 0
+	if !linked {
+		if iface == "" || strings.TrimSpace(req.Subnet) == "" {
+			usedIfaces, usedOctets, _, serr := s.wizardGREState()
+			if serr == nil {
+				if iface == "" {
+					iface = nextFreeIface(usedIfaces)
+				}
+				if strings.TrimSpace(req.Subnet) == "" {
+					autoOctet = nextFreeSubnet(usedOctets)
+				}
+			}
+		}
+	}
 	if iface == "" {
 		iface = wizardIface
 	}
@@ -210,6 +234,8 @@ func (s *Server) resolveForeignTunnel(req *foreignScriptReq, bindAddr string) (g
 		octet := wizardSubnetStart
 		if v, ok := subnetOctet(strings.TrimSpace(req.Subnet)); ok {
 			octet = v
+		} else if autoOctet > 0 {
+			octet = autoOctet
 		}
 		if foreignPriv == "" {
 			foreignPriv = fmt.Sprintf("10.100.%d.1/30", octet)
@@ -299,7 +325,7 @@ func buildForeignScript(t gre.Tunnel, serverAddr string, serverPort int, token, 
 		return nil, "", fmt.Errorf("invalid clientName %q", name)
 	}
 
-	encrypt := !o.RawSpeed
+	encrypt := false
 	cfg, err := frpconf.NewClientConfig(frpconf.ClientOptions{
 		ServerAddr:     serverAddr,
 		ServerPort:     serverPort,
@@ -308,7 +334,7 @@ func buildForeignScript(t gre.Tunnel, serverAddr string, serverPort int, token, 
 		Ports:          specs,
 		Proto:          proto,
 		LocalIP:        localIP,
-		UseTLS:         !o.RawSpeed,
+		UseTLS:         false,
 		UseEncryption:  &encrypt,
 		UseCompression: false,
 	})
@@ -437,9 +463,11 @@ func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientCon
 	w("  trap - EXIT")
 	w("fi")
 	w("")
+	w("if [ ! -f /etc/systemd/system/frpc@.service ]; then")
 	w("cat > /etc/systemd/system/frpc@.service <<'FRP_FRPC_UNIT'")
 	writeBlock(frpcUnit)
 	w("FRP_FRPC_UNIT")
+	w("fi")
 	w("")
 	w("# ---- frpc config (matches the Iran frps exactly) --------------------------")
 	w("cat > \"/root/frp/client/${CLIENT_NAME}.toml\" <<'FRP_CLIENT_TOML'")
@@ -453,6 +481,22 @@ func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientCon
 	w("systemctl restart \"gre-tunnel@${IFACE}\"")
 	w("systemctl enable \"frpc@${CLIENT_NAME}\"")
 	w("systemctl restart \"frpc@${CLIENT_NAME}\"")
+	w("")
+	w("# ---- kernel tuning + 3h FRP GC cron (mikeesierrah profile) ----------------")
+	w("mkdir -p /etc/modules-load.d /etc/sysctl.d")
+	w("echo tcp_bbr > /etc/modules-load.d/bbr.conf")
+	w("cat > /etc/sysctl.d/99-frp-bbr.conf <<'FRP_BBR_CONF'")
+	w("net.core.default_qdisc=fq")
+	w("net.ipv4.tcp_congestion_control=bbr")
+	w("FRP_BBR_CONF")
+	w("modprobe tcp_bbr 2>/dev/null || true")
+	w("sysctl --system >/dev/null 2>&1 || true")
+	w("GC_CRON='0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps'")
+	w("if command -v crontab >/dev/null 2>&1; then")
+	w("  crontab -l 2>/dev/null | grep -Fq \"$GC_CRON\" || { (crontab -l 2>/dev/null; echo \"$GC_CRON\") | crontab -; }")
+	w("else")
+	w("  echo 'WARNING: crontab not installed — add the FRP GC cron manually.' >&2")
+	w("fi")
 	w("")
 	w("sleep 3")
 	w("echo")

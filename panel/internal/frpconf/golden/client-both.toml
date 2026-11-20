@@ -11,11 +11,11 @@ auth.token = "K7mQz2xVb9LrT4nY8wPd3cJ6hFgA1sEu"
 transport.protocol = "tcp"
 transport.tcpMux = false
 transport.tcpMuxKeepaliveInterval = 10
-transport.dialServerTimeout = 5
-transport.dialServerKeepalive = 30
-transport.poolCount = 30
-transport.heartbeatInterval = 10
-transport.heartbeatTimeout = 30
+transport.dialServerTimeout = 10
+transport.dialServerKeepalive = 120
+transport.poolCount = 20
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
 transport.tls.enable = true
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
@@ -26,75 +26,24 @@ webServer.port = 7400
 webServer.user = "admin"
 webServer.password = "FixtureWebPassClient12345"
 
+{{- range $_, $v := parseNumberRangePair "22,6000-6002" "22,6000-6002" }}
 [[proxies]]
-name = "tcp-22"
+name = "tcp-{{ $v.First }}"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 22
-remotePort = 22
-transport.useEncryption = true
+localPort = {{ $v.First }}
+remotePort = {{ $v.Second }}
+transport.useEncryption = false
 transport.useCompression = false
+{{- end }}
 
+{{- range $_, $v := parseNumberRangePair "22,6000-6002" "22,6000-6002" }}
 [[proxies]]
-name = "udp-22"
+name = "udp-{{ $v.First }}"
 type = "udp"
 localIP = "127.0.0.1"
-localPort = 22
-remotePort = 22
-transport.useEncryption = true
+localPort = {{ $v.First }}
+remotePort = {{ $v.Second }}
+transport.useEncryption = false
 transport.useCompression = false
-
-[[proxies]]
-name = "tcp-6000"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 6000
-remotePort = 6000
-transport.useEncryption = true
-transport.useCompression = false
-
-[[proxies]]
-name = "udp-6000"
-type = "udp"
-localIP = "127.0.0.1"
-localPort = 6000
-remotePort = 6000
-transport.useEncryption = true
-transport.useCompression = false
-
-[[proxies]]
-name = "tcp-6001"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 6001
-remotePort = 6001
-transport.useEncryption = true
-transport.useCompression = false
-
-[[proxies]]
-name = "udp-6001"
-type = "udp"
-localIP = "127.0.0.1"
-localPort = 6001
-remotePort = 6001
-transport.useEncryption = true
-transport.useCompression = false
-
-[[proxies]]
-name = "tcp-6002"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 6002
-remotePort = 6002
-transport.useEncryption = true
-transport.useCompression = false
-
-[[proxies]]
-name = "udp-6002"
-type = "udp"
-localIP = "127.0.0.1"
-localPort = 6002
-remotePort = 6002
-transport.useEncryption = true
-transport.useCompression = false
-
+{{- end }}

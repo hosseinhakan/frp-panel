@@ -14,9 +14,9 @@ import (
 )
 
 type turboReq struct {
-	Action string `json:"action"` // apply | revert | zram-on | zram-off
+	Action string `json:"action"` // apply | revert | zram-on | zram-off | gc-cron | volatile-logs | clear-logs
 	Size   int    `json:"size"`   // MB, zram-on only (default 2048)
-	Algo   string `json:"algo"`  // zram-on only (default lz4)
+	Algo   string `json:"algo"`   // zram-on only (default lz4)
 }
 
 // handleTurboGet reports the current kernel/tuning state: unit states,
@@ -33,6 +33,11 @@ func (s *Server) handleTurboGet(w http.ResponseWriter, r *http.Request) {
 		"units": map[string]any{
 			"tunnel-turbo": s.unitState("tunnel-turbo"),
 			"frp-zram":     s.unitState("frp-zram"),
+		},
+		"gcCron": map[string]any{
+			"active":   s.gcCronActive(),
+			"schedule": "0 */3 * * *",
+			"command":  "pkill -10 -x frpc; pkill -10 -x frps",
 		},
 	}
 
@@ -74,9 +79,40 @@ func (s *Server) handleTurboPost(w http.ResponseWriter, r *http.Request) {
 		s.zramOn(w, req)
 	case "zram-off":
 		s.zramOff(w)
+	case "gc-cron":
+		s.turboUtility(w, "gc-cron", "FRP GC cron installed (every 3h)")
+	case "volatile-logs":
+		s.turboUtility(w, "volatile-logs", "logs moved to volatile memory (journald)")
+	case "clear-logs":
+		s.turboUtility(w, "clear-logs", "system logs cleared")
 	default:
-		writeErr(w, http.StatusBadRequest, "invalid action %q (want apply|revert|zram-on|zram-off)", req.Action)
+		writeErr(w, http.StatusBadRequest,
+			"invalid action %q (want apply|revert|zram-on|zram-off|gc-cron|volatile-logs|clear-logs)", req.Action)
 	}
+}
+
+// gcCronActive reports whether the 3h FRP GC cron is installed. The helper
+// prints `gc-cron=active` / `gc-cron=missing`; a missing binary means no.
+func (s *Server) gcCronActive() bool {
+	out, err := s.runner.Exec("frp-turbo", "gc-status")
+	return err == nil && strings.Contains(out, "gc-cron=active")
+}
+
+// turboUtility runs one of the mikeesierrah system utilities through the
+// canonical frp-turbo helper (installed from the embedded asset first).
+func (s *Server) turboUtility(w http.ResponseWriter, action, status string) {
+	if err := s.ensureTurboAssets(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to install turbo assets: %v", err)
+		return
+	}
+	out, err := s.runner.Exec("frp-turbo", action)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "frp-turbo %s failed: %s", action,
+			strings.TrimSpace(strings.TrimSpace(out)+" "+err.Error()))
+		return
+	}
+	audit("turbo utility %s", action)
+	writeJSON(w, http.StatusOK, map[string]any{"status": status, "output": strings.TrimSpace(out)})
 }
 
 func (s *Server) turboApply(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package frpconf
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -63,7 +64,12 @@ func RenderServer(c *ServerConfig) string {
 }
 
 // RenderClient renders a ClientConfig into canonical frpc TOML.
-// Proxy blocks come out in insertion order: per port, tcp before udp.
+//
+// The suite follows the proven mikeesierrah profile: compact
+// parseNumberRangePair templates for ports, no TLS/encryption/compression by
+// default, and the long-haul keepalive/heartbeat values from Section 1.
+// Configs that were created as plain [[proxies]] blocks stay plain: the
+// RangeTemplate flag records which layout the file uses.
 func RenderClient(c *ClientConfig) string {
 	var b strings.Builder
 	w := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
@@ -99,18 +105,104 @@ func RenderClient(c *ClientConfig) string {
 		w("webServer.password = %q", c.WebServer.Password)
 		w("")
 	}
-	for _, p := range c.Proxies {
-		w("[[proxies]]")
-		w("name = %q", p.Name)
-		w("type = %q", p.Type)
-		w("localIP = %q", p.LocalIP)
-		w("localPort = %d", p.LocalPort)
-		w("remotePort = %d", p.RemotePort)
-		w("transport.useEncryption = %t", p.Transport.UseEncryption)
-		w("transport.useCompression = %t", p.Transport.UseCompression)
-		w("")
-	}
+	renderClientProxies(&b, c)
 	return b.String()
+}
+
+// renderClientProxies appends either the compact range template or the
+// expanded [[proxies]] blocks. The template is used only when every proxy
+// forwards localPort == remotePort (the shape parseNumberRangePair can express).
+func renderClientProxies(b *strings.Builder, c *ClientConfig) {
+	if c.RangeTemplate && canRangeTemplate(c.Proxies) {
+		local := strings.TrimSpace(c.RangeLocal)
+		remote := strings.TrimSpace(c.RangeRemote)
+		types := proxyTypes(c.Proxies)
+		if len(types) == 0 {
+			return
+		}
+		if local == "" {
+			local = formatProxyPorts(c.Proxies, types[0])
+		}
+		if remote == "" {
+			remote = local
+		}
+		first := c.Proxies[0]
+		for i, typ := range types {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			fmt.Fprintf(b, "{{- range $_, $v := parseNumberRangePair %q %q }}\n", local, remote)
+			b.WriteString("[[proxies]]\n")
+			fmt.Fprintf(b, "name = %q\n", typ+"-{{ $v.First }}")
+			fmt.Fprintf(b, "type = %q\n", typ)
+			fmt.Fprintf(b, "localIP = %q\n", first.LocalIP)
+			b.WriteString("localPort = {{ $v.First }}\n")
+			b.WriteString("remotePort = {{ $v.Second }}\n")
+			fmt.Fprintf(b, "transport.useEncryption = %t\n", first.Transport.UseEncryption)
+			fmt.Fprintf(b, "transport.useCompression = %t\n", first.Transport.UseCompression)
+			b.WriteString("{{- end }}\n")
+		}
+		return
+	}
+	for _, p := range c.Proxies {
+		fmt.Fprintf(b, "[[proxies]]\n")
+		fmt.Fprintf(b, "name = %q\n", p.Name)
+		fmt.Fprintf(b, "type = %q\n", p.Type)
+		fmt.Fprintf(b, "localIP = %q\n", p.LocalIP)
+		fmt.Fprintf(b, "localPort = %d\n", p.LocalPort)
+		fmt.Fprintf(b, "remotePort = %d\n", p.RemotePort)
+		fmt.Fprintf(b, "transport.useEncryption = %t\n", p.Transport.UseEncryption)
+		fmt.Fprintf(b, "transport.useCompression = %t\n", p.Transport.UseCompression)
+		b.WriteString("\n")
+	}
+}
+
+func canRangeTemplate(proxies []Proxy) bool {
+	if len(proxies) == 0 {
+		return false
+	}
+	first := proxies[0]
+	for _, p := range proxies {
+		if p.LocalPort != p.RemotePort || p.LocalIP != first.LocalIP ||
+			p.Transport.UseEncryption != first.Transport.UseEncryption ||
+			p.Transport.UseCompression != first.Transport.UseCompression {
+			return false
+		}
+	}
+	return true
+}
+
+// proxyTypes returns the distinct proxy types in stable order (tcp, udp).
+func proxyTypes(proxies []Proxy) []string {
+	has := map[string]bool{}
+	for _, p := range proxies {
+		has[p.Type] = true
+	}
+	out := []string{}
+	for _, typ := range []string{"tcp", "udp"} {
+		if has[typ] {
+			out = append(out, typ)
+		}
+	}
+	return out
+}
+
+func formatProxyPorts(proxies []Proxy, typ string) string {
+	seen := map[int]bool{}
+	var ports []int
+	for _, p := range proxies {
+		if p.Type != typ || seen[p.LocalPort] {
+			continue
+		}
+		seen[p.LocalPort] = true
+		ports = append(ports, p.LocalPort)
+	}
+	sort.Ints(ports)
+	specs := make([]PortSpec, 0, len(ports))
+	for _, p := range ports {
+		specs = append(specs, PortSpec{Start: p, End: p})
+	}
+	return FormatPortSpecs(specs)
 }
 
 // WriteServer renders and writes a ServerConfig to disk.

@@ -162,6 +162,8 @@ a:hover { text-decoration: underline; }
 .grid-3 { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 
 .row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.utilrow { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.utilrow > div { max-width: 46rem; }
 .row.end { justify-content: flex-end; }
 .row.between { justify-content: space-between; }
 .stack { display: flex; flex-direction: column; gap: 0.9rem; }

@@ -311,10 +311,19 @@ func TestClassify(t *testing.T) {
 		t.Errorf("extra-key client: style=%v unknown=%q err=%v, want managed/log", style, unknown, err)
 	}
 
-	template := []byte("serverAddr = \"1.2.3.4\"\n{{- range $_, $v := parseNumberRangePair \"6000-6001\" }}\n[[proxies]]\n{{- end }}\n")
+	// parseNumberRangePair is the proven mikeesierrah layout: structurally
+	// editable, never raw-only.
+	template := []byte("serverAddr = \"1.2.3.4\"\n{{- range $_, $v := parseNumberRangePair \"6000-6001\" \"6000-6001\" }}\n[[proxies]]\nname = \"tcp-{{ $v.First }}\"\ntype = \"tcp\"\nlocalIP = \"127.0.0.1\"\nlocalPort = {{ $v.First }}\nremotePort = {{ $v.Second }}\n{{- end }}\n")
 	style, _, err = Classify(template, KindClient)
+	if err != nil || style != StyleManaged {
+		t.Errorf("range-template client: style=%v err=%v, want managed", style, err)
+	}
+
+	// Any other Go template stays raw-only.
+	otherTemplate := []byte("serverAddr = \"1.2.3.4\"\n{{ if .X }}\nserverPort = 7000\n{{ end }}\n")
+	style, _, err = Classify(otherTemplate, KindClient)
 	if err != nil || style != StyleTemplate {
-		t.Errorf("template client: style=%v err=%v, want template", style, err)
+		t.Errorf("other-template client: style=%v err=%v, want template", style, err)
 	}
 
 	broken := []byte("serverAddr = [\n")
@@ -375,7 +384,80 @@ role = "stream"
 
 // ---- webServer port allocation ------------------------------------------
 
-func TestUsedWebServerPortsAndAllocate(t *testing.T) {
+func TestRangeTemplateParseAndCompose(t *testing.T) {
+	raw := []byte(`serverAddr = "10.100.111.2"
+serverPort = 7025
+
+loginFailExit = false
+
+auth.method = "token"
+auth.token = "ServerToken1234567890"
+
+transport.protocol = "tcp"
+transport.tcpMux = false
+transport.tcpMuxKeepaliveInterval = 10
+transport.dialServerTimeout = 10
+transport.dialServerKeepalive = 120
+transport.poolCount = 20
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+transport.tls.enable = false
+transport.quic.keepalivePeriod = 10
+transport.quic.maxIdleTimeout = 30
+transport.quic.maxIncomingStreams = 100000
+
+{{- range $_, $v := parseNumberRangePair "8989,6000-6002" "8989,6000-6002" }}
+[[proxies]]
+name = "tcp-{{ $v.First }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = {{ $v.First }}
+remotePort = {{ $v.Second }}
+transport.useEncryption = false
+transport.useCompression = false
+{{- end }}
+`)
+	style, unknown, err := Classify(raw, KindClient)
+	if err != nil || style != StyleManaged || unknown != "" {
+		t.Fatalf("classify = %v/%q/%v, want managed/empty", style, unknown, err)
+	}
+	cfg, err := ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RangeTemplate || len(cfg.Proxies) != 4 {
+		t.Fatalf("parsed range cfg = range:%v proxies:%d, want true/4", cfg.RangeTemplate, len(cfg.Proxies))
+	}
+	if cfg.Proxies[0].Name != "tcp-8989" || cfg.Proxies[3].Name != "tcp-6002" {
+		t.Errorf("range proxies = %v", cfg.Proxies)
+	}
+
+	// Replace the ports while keeping the compact template.
+	specs, _ := ParsePortSpecs("8989,9443")
+	cfg.Proxies = BuildProxies(specs, ProtoTCPOnly, "127.0.0.1", false, false)
+	cfg.RangeLocal = "8989,9443"
+	cfg.RangeRemote = "8989,9443"
+	cfg.Transport.TLS.Enable = true
+	out, err := ComposeClient(raw, cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{
+		`parseNumberRangePair "8989,9443" "8989,9443"`,
+		"transport.tls.enable = true",
+		`name = "tcp-{{ $v.First }}"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("composed range config missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "6000") {
+		t.Errorf("old ports survived the edit:\n%s", s)
+	}
+}
+
+func TestUsedWebServerPorts(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteServer(filepath.Join(dir, "server-7000.toml"), serverQuicFixture()); err != nil {
 		t.Fatal(err)

@@ -6,7 +6,8 @@
 # actually loaded, so the script never fails on hosts without it.
 # Canonical copy: panel/internal/assets/helpers/frp-turbo (also embedded in frp-panel).
 #
-# Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status
+# Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status|
+#                   gc-cron|gc-status|volatile-logs|clear-logs
 set -euo pipefail
 
 SYSCTL_DROPIN="/etc/sysctl.d/99-tunnel-turbo.conf"
@@ -16,7 +17,7 @@ ZRAM_ENV="/etc/frp-panel/zram.env"
 GC_CRON="0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps"
 
 usage() {
-    echo "usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status" >&2
+    echo "usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status|gc-cron|gc-status|volatile-logs|clear-logs" >&2
     exit 2
 }
 
@@ -136,6 +137,55 @@ cmd_zram_status() {
         || echo "frp-turbo: no zram swap active"
 }
 
+# ---- mikeesierrah utilities --------------------------------------------------
+
+cmd_gc_cron() {
+    ensure_gc_cron
+    cmd_gc_status
+}
+
+cmd_gc_status() {
+    if crontab -l 2>/dev/null | grep -Fq "$GC_CRON"; then
+        echo "frp-turbo: gc-cron=active"
+    else
+        echo "frp-turbo: gc-cron=missing"
+    fi
+}
+
+journald_set() { # journald_set KEY VALUE
+    local key="$1" value="$2" file="/etc/systemd/journald.conf"
+    mkdir -p /etc/systemd
+    touch "$file"
+    if grep -Eq "^[#[:space:]]*${key}=" "$file"; then
+        sed -i "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+cmd_volatile_logs() {
+    # Reduce disk I/O: logs live in memory. rsyslog is optional on minimal
+    # images, so a missing/disabled rsyslog is not an error.
+    systemctl disable --now rsyslog >/dev/null 2>&1 || true
+    journald_set Storage volatile
+    journald_set SystemMaxUse 50M
+    journald_set SystemKeepFree 5M
+    systemctl restart systemd-journald
+    echo "frp-turbo: journald volatile (Storage=volatile, SystemMaxUse=50M, SystemKeepFree=5M); rsyslog disabled"
+}
+
+cmd_clear_logs() {
+    journalctl --vacuum-time=1s >/dev/null 2>&1 || true
+    find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; 2>/dev/null || true
+    find /var/log -type f -name "*.log.*" -delete 2>/dev/null || true
+    find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.2" -o -name "*.3" \
+        -o -name "*.4" -o -name "*.5" -o -name "*.6" -o -name "*.7" -o -name "*.8" \
+        -o -name "*.9" \) -delete 2>/dev/null || true
+    truncate -s 0 /var/log/wtmp 2>/dev/null || true
+    truncate -s 0 /var/log/btmp 2>/dev/null || true
+    echo "frp-turbo: system logs cleared (journal vacuumed, rotated logs removed)"
+}
+
 case "${1:-}" in
     apply) cmd_apply ;;
     revert) cmd_revert ;;
@@ -143,5 +193,9 @@ case "${1:-}" in
     zram-on) cmd_zram_on ;;
     zram-off) cmd_zram_off ;;
     zram-status) cmd_zram_status ;;
+    gc-cron) cmd_gc_cron ;;
+    gc-status) cmd_gc_status ;;
+    volatile-logs) cmd_volatile_logs ;;
+    clear-logs) cmd_clear_logs ;;
     *) usage ;;
 esac

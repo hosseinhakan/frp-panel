@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frp-suite/panel/internal/frpconf"
 	"github.com/frp-suite/panel/internal/gre"
 	"github.com/frp-suite/panel/internal/watchdog"
 )
@@ -210,8 +211,8 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 	if client["serverAddr"] != "10.100.111.2" || client["serverPort"] != float64(7025) {
 		t.Errorf("client = %v", client)
 	}
-	if client["tls"] != true {
-		t.Error("TLS must be enabled by default")
+	if client["tls"] != false {
+		t.Error("TLS must be off by default (mikeesierrah profile)")
 	}
 	if client["proxies"] != float64(2) {
 		t.Errorf("proxies = %v, want 2 tcp proxies", client["proxies"])
@@ -227,12 +228,17 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 	for _, want := range []string{
 		`serverAddr = "10.100.111.2"`,
 		`serverPort = 7025`,
-		`transport.tls.enable = true`,
-		`transport.useEncryption = true`,
+		`transport.tls.enable = false`,
+		`transport.useEncryption = false`,
 		`transport.useCompression = false`,
-		`localPort = 443`,
-		`remotePort = 443`,
-		`localPort = 2053`,
+		`parseNumberRangePair "443,2053" "443,2053"`,
+		`localPort = {{ $v.First }}`,
+		`remotePort = {{ $v.Second }}`,
+		`transport.dialServerTimeout = 10`,
+		`transport.dialServerKeepalive = 120`,
+		`transport.poolCount = 20`,
+		`transport.heartbeatInterval = 30`,
+		`transport.heartbeatTimeout = 90`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("frpc config missing %q:\n%s", want, raw)
@@ -552,8 +558,12 @@ func TestWizardForeignRerunRefreshesClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(raw), "[[proxies]]") != 2 {
-		t.Errorf("rerun duplicated proxies:\n%s", raw)
+	cfg, err := frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatalf("rerun config does not parse: %v\n%s", err, raw)
+	}
+	if len(cfg.Proxies) != 2 {
+		t.Errorf("rerun duplicated proxies (%d):\n%s", len(cfg.Proxies), raw)
 	}
 }
 

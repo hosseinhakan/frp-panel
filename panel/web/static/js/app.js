@@ -793,7 +793,7 @@ document.addEventListener("alpine:init", () => {
         token: "",
         rawSpeed: false,
         foreignPorts: "8989",
-        foreignProto: "both",
+        foreignProto: "tcp",
         foreignRawSpeed: false,
         foreignBusy: false,
         foreignError: "",
@@ -929,6 +929,7 @@ document.addEventListener("alpine:init", () => {
     loading: true,
     greIPs: [],
     tunnels: [],
+    wizDefaults: null,
 
     wiz: null,
     edit: null,
@@ -945,6 +946,11 @@ document.addEventListener("alpine:init", () => {
           this.greIPs = this.tunnels
             .map((t) => (t.local_private_ip || "").split("/")[0])
             .filter(Boolean);
+        })
+        .catch(() => {});
+      FRP.api("/api/wizard/defaults")
+        .then((d) => {
+          this.wizDefaults = d;
         })
         .catch(() => {});
     },
@@ -1045,8 +1051,8 @@ document.addEventListener("alpine:init", () => {
           token: d.token || "",
           tcpMux: !!c.tcpMux,
           tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
-          heartbeatTimeout: c.heartbeatTimeout || 30,
-          tcpKeepalive: c.tcpKeepalive || 30,
+          heartbeatTimeout: c.heartbeatTimeout || 90,
+          tcpKeepalive: c.tcpKeepalive || 120,
           maxPoolCount: c.maxPoolCount || 65535,
           quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
           quicMaxIdleTimeout: c.quicMaxIdleTimeout || 30,
@@ -1074,8 +1080,8 @@ document.addEventListener("alpine:init", () => {
             protocol: e.protocol,
             tcpMux: e.tcpMux,
             tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
-            heartbeatTimeout: Number(e.heartbeatTimeout) || 30,
-            tcpKeepalive: Number(e.tcpKeepalive) || 30,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 90,
+            tcpKeepalive: Number(e.tcpKeepalive) || 120,
             maxPoolCount: Number(e.maxPoolCount) || 65535,
             quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
             quicMaxIdleTimeout: Number(e.quicMaxIdleTimeout) || 30,
@@ -1119,16 +1125,17 @@ document.addEventListener("alpine:init", () => {
             this.ipOf(t.local_private_ip) === row.bindAddr ||
             this.ipOf(t.remote_private_ip) === row.bindAddr
         ) || (this.tunnels.length === 1 ? this.tunnels[0] : null);
+      const dflt = this.wizDefaults || {};
       this.foreign = {
         row,
         linked: !!linked,
-        iface: linked ? linked.iface : "gt11",
+        iface: linked ? linked.iface : dflt.iface || "gt11",
         iranPublicIp: linked ? linked.local_public_ip : "",
         foreignPublicIp: linked ? linked.remote_public_ip : "",
         ports: "8989",
-        proto: "both",
+        proto: "tcp",
         localIp: "127.0.0.1",
-        subnet: "10.100.111.0/30",
+        subnet: linked ? "" : dflt.subnet || "",
         rawSpeed: false,
         busy: false,
         error: "",
@@ -1317,10 +1324,10 @@ document.addEventListener("alpine:init", () => {
         tokenSource: first ? "local:" + first.name : "paste",
         token: first ? first.token : "",
         protocol: "tcp",
-        useTls: true,
-        useEncryption: true,
+        useTls: false,
+        useEncryption: false,
         useCompression: false,
-        rawSpeed: false,
+        rawSpeed: true,
         tcpMux: false,
         proto: "both",
         ports: "8989,8443,2053",
@@ -1473,8 +1480,8 @@ document.addEventListener("alpine:init", () => {
         const hasTCP = proxies.some((p) => p.type === "tcp");
         const hasUDP = proxies.some((p) => p.type === "udp");
         const first = proxies[0] || {};
-        const enc = first.useEncryption !== false;
-        const tls = c.tls !== undefined ? !!c.tls : !!row.tls;
+        const enc = first.useEncryption === true;
+        const tls = c.tls !== undefined ? !!c.tls : false;
         this.edit = {
           name: row.name,
           style,
@@ -1482,20 +1489,24 @@ document.addEventListener("alpine:init", () => {
           serverPort: c.serverPort || row.serverPort,
           token: "",
           protocol: c.protocol || row.protocol || "tcp",
-          ports: ports.join(","),
+          ports: c.portsSpec || ports.join(","),
           proto: hasTCP && hasUDP ? "both" : hasUDP ? "udp" : "tcp",
           localIp: first.localIp || "127.0.0.1",
           useTls: tls,
           useEncryption: enc,
-          useCompression: !!first.useCompression,
+          useCompression: first.useCompression === true,
           tcpMux: c.tcpMux !== undefined ? !!c.tcpMux : !!row.tcpMux,
           tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
-          dialServerTimeout: c.dialServerTimeout || 5,
-          dialServerKeepalive: c.dialServerKeepalive || 30,
-          poolCount: c.poolCount || 30,
-          heartbeatInterval: c.heartbeatInterval || 10,
-          heartbeatTimeout: c.heartbeatTimeout || 30,
+          dialServerTimeout: c.dialServerTimeout || 10,
+          dialServerKeepalive: c.dialServerKeepalive || 120,
+          poolCount: c.poolCount || 20,
+          heartbeatInterval: c.heartbeatInterval || 30,
+          heartbeatTimeout: c.heartbeatTimeout || 90,
+          quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
+          quicMaxIdleTimeout: c.quicMaxIdleTimeout || 30,
+          quicMaxIncomingStreams: c.quicMaxIncomingStreams || 100000,
           loginFailExit: !!c.loginFailExit,
+          rangeTemplate: !!c.rangeTemplate,
           restart: !!(d.unit && d.unit.active === "active"),
           rawSpeed: !tls && !enc,
           busy: false,
@@ -1523,11 +1534,14 @@ document.addEventListener("alpine:init", () => {
             useCompression: e.useCompression,
             tcpMux: e.tcpMux,
             tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
-            dialServerTimeout: Number(e.dialServerTimeout) || 5,
-            dialServerKeepalive: Number(e.dialServerKeepalive) || 30,
-            poolCount: Number(e.poolCount) || 30,
-            heartbeatInterval: Number(e.heartbeatInterval) || 10,
-            heartbeatTimeout: Number(e.heartbeatTimeout) || 30,
+            dialServerTimeout: Number(e.dialServerTimeout) || 10,
+            dialServerKeepalive: Number(e.dialServerKeepalive) || 120,
+            poolCount: Number(e.poolCount) || 20,
+            heartbeatInterval: Number(e.heartbeatInterval) || 30,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 90,
+            quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
+            quicMaxIdleTimeout: Number(e.quicMaxIdleTimeout) || 30,
+            quicMaxIncomingStreams: Number(e.quicMaxIncomingStreams) || 100000,
             loginFailExit: !!e.loginFailExit,
             restart: !!e.restart,
             ports: e.ports.trim(),
@@ -1765,6 +1779,60 @@ document.addEventListener("alpine:init", () => {
     get sysctlRows() {
       const sc = (this.state && this.state.sysctl) || {};
       return Object.entries(sc).map(([k, v]) => ({ k, v }));
+    },
+    get gcCron() {
+      return (this.state && this.state.gcCron) || null;
+    },
+
+    async gcCronRun() {
+      this.busy = true;
+      try {
+        const d = await FRP.api("/api/system/turbo", { method: "POST", body: { action: "gc-cron" } });
+        this.$store.ui.push(d.status + (d.output ? " — " + d.output : ""), "ok");
+        this.load();
+      } catch (e) {
+        this.$store.ui.push("gc cron: " + e.message, "bad");
+      }
+      this.busy = false;
+    },
+
+    async volatileLogs() {
+      const ok = await this.$store.ui.confirm({
+        title: "Move logs to volatile memory?",
+        message:
+          "Disables rsyslog and configures journald with Storage=volatile, SystemMaxUse=50M, SystemKeepFree=5M. Logs will not survive a reboot.",
+        confirmText: "Apply",
+      });
+      if (!ok) return;
+      this.busy = true;
+      try {
+        const d = await FRP.api("/api/system/turbo", { method: "POST", body: { action: "volatile-logs" } });
+        this.$store.ui.push(d.status, "ok");
+        this.load();
+      } catch (e) {
+        this.$store.ui.push("volatile logs: " + e.message, "bad");
+      }
+      this.busy = false;
+    },
+
+    async clearLogs() {
+      const ok = await this.$store.ui.confirm({
+        title: "Permanently clear all system logs?",
+        message:
+          "Vacuums the journal, truncates /var/log/*.log and wtmp/btmp, and deletes rotated .gz/.1–.9 logs. This cannot be undone.",
+        confirmText: "Clear logs",
+        danger: true,
+      });
+      if (!ok) return;
+      this.busy = true;
+      try {
+        const d = await FRP.api("/api/system/turbo", { method: "POST", body: { action: "clear-logs" } });
+        this.$store.ui.push(d.status, "ok");
+        this.load();
+      } catch (e) {
+        this.$store.ui.push("clear logs: " + e.message, "bad");
+      }
+      this.busy = false;
     },
 
     async apply() {

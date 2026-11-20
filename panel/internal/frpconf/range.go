@@ -51,6 +51,20 @@ func ParsePortSpecs(input string) ([]PortSpec, error) {
 	return specs, nil
 }
 
+// FormatPortSpecs renders specs back into the compact "22,6000-6006" form.
+// Consecutive single ports are not merged: the input shape is preserved.
+func FormatPortSpecs(specs []PortSpec) string {
+	parts := make([]string, 0, len(specs))
+	for _, s := range specs {
+		if s.IsRange() {
+			parts = append(parts, fmt.Sprintf("%d-%d", s.Start, s.End))
+		} else {
+			parts = append(parts, strconv.Itoa(s.Start))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 func parseOneSpec(f string) (int, int, error) {
 	startStr, endStr, isRange := strings.Cut(f, "-")
 	start, err := strconv.Atoi(strings.TrimSpace(startStr))

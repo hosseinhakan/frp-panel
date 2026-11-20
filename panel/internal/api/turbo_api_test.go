@@ -61,6 +61,37 @@ func TestTurboGetState(t *testing.T) {
 	}
 }
 
+func TestTurboSystemUtilities(t *testing.T) {
+	e := newTestEnv(t)
+	e.runner.execOut["frp-turbo gc-status"] = "frp-turbo: gc-cron=active\n"
+	rec := e.authorized(http.MethodGet, "/api/system/turbo", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d: %s", rec.Code, rec.Body.String())
+	}
+	gc, _ := jsonMap(t, rec)["gcCron"].(map[string]any)
+	if gc == nil || gc["active"] != true {
+		t.Errorf("gcCron = %v, want active", gc)
+	}
+
+	for _, tc := range []struct{ action, output string }{
+		{"gc-cron", "frp-turbo: gc-cron=active"},
+		{"volatile-logs", "frp-turbo: journald volatile"},
+		{"clear-logs", "frp-turbo: system logs cleared"},
+	} {
+		e.runner.execOut["frp-turbo "+tc.action] = tc.output + "\n"
+		rec := e.authorized(http.MethodPost, "/api/system/turbo", `{"action":"`+tc.action+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d: %s", tc.action, rec.Code, rec.Body.String())
+		}
+		if !e.runner.called("exec:frp-turbo " + tc.action) {
+			t.Errorf("%s did not call the helper", tc.action)
+		}
+		if out, _ := jsonMap(t, rec)["output"].(string); out != tc.output {
+			t.Errorf("%s output = %q, want %q", tc.action, out, tc.output)
+		}
+	}
+}
+
 func TestTurboGetWithoutHelper(t *testing.T) {
 	// Fresh host: no helper, no drop-in — the GET must still succeed.
 	e := newTestEnv(t)

@@ -19,13 +19,19 @@ func ParseServer(raw []byte) (*ServerConfig, error) {
 	return cfg, nil
 }
 
-// ParseClient decodes frpc TOML into the managed model.
+// ParseClient decodes frpc TOML into the managed model. Range-template
+// configs (parseNumberRangePair) are expanded into the same proxy list, so
+// every forwarded port stays visible and editable.
 func ParseClient(raw []byte) (*ClientConfig, error) {
 	cfg := &ClientConfig{}
-	if err := toml.Unmarshal(raw, cfg); err != nil {
-		return nil, err
+	err := toml.Unmarshal(raw, cfg)
+	if err == nil {
+		return cfg, nil
 	}
-	return cfg, nil
+	if rangeCfg, rerr := parseRangeClient(raw); rerr == nil {
+		return rangeCfg, nil
+	}
+	return nil, err
 }
 
 // ReadServer reads and parses an frps config file from disk.
@@ -80,6 +86,21 @@ func (s Style) String() string {
 // because ComposeServer/ComposeClient merge unknown keys back into the file.
 func Classify(raw []byte, kind Kind) (Style, string, error) {
 	if bytes.Contains(raw, []byte("{{")) {
+		// A parseNumberRangePair template is a first-class, structurally
+		// editable config — not raw-only. Anything else that still contains
+		// template directives remains StyleTemplate.
+		if stripped, _, ok := stripRangeBlocks(raw); ok {
+			var m map[string]any
+			if err := toml.Unmarshal(stripped, &m); err == nil {
+				var unknown string
+				if kind == KindServer {
+					unknown, _ = classifyServer(m)
+				} else {
+					unknown, _ = classifyClient(m)
+				}
+				return StyleManaged, unknown, nil
+			}
+		}
 		return StyleTemplate, "", nil
 	}
 	var m map[string]any
@@ -319,16 +340,13 @@ func UsedClientRemotePorts(dir string) (map[int]bool, error) {
 		if err != nil {
 			continue
 		}
-		var m struct {
-			Proxies []struct {
-				RemotePort int `toml:"remotePort"`
-			} `toml:"proxies"`
+		cfg, err := ParseClient(raw)
+		if err != nil {
+			continue
 		}
-		if toml.Unmarshal(raw, &m) == nil {
-			for _, p := range m.Proxies {
-				if p.RemotePort > 0 {
-					used[p.RemotePort] = true
-				}
+		for _, p := range cfg.Proxies {
+			if p.RemotePort > 0 {
+				used[p.RemotePort] = true
 			}
 		}
 	}
@@ -359,6 +377,11 @@ func UsedWebServerPorts(dir string) (map[int]bool, error) {
 		}
 		if toml.Unmarshal(raw, &m) == nil && m.WebServer.Port > 0 {
 			used[m.WebServer.Port] = true
+			continue
+		}
+		// Range-template configs: parse the non-template remainder.
+		if cfg, perr := parseRangeClient(raw); perr == nil && cfg.WebServer.Port > 0 {
+			used[cfg.WebServer.Port] = true
 		}
 	}
 	return used, nil

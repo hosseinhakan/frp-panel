@@ -221,6 +221,21 @@ emission := for each port p in expansion(p, udp_toggle, name_prefix):
               udp block  name = "udp-<p>"   (only when toggle ON)
 ```
 
+The canonical panel renderer emits the compact FRP template form instead of
+unrolling every port:
+
+```
+{{- range $_, $v := parseNumberRangePair "22,6000-6006" "22,6000-6006" }}
+[[proxies]]
+...
+{{- end }}
+```
+
+`frpconf` expands that template back into `Proxies` for the UI, classifies it
+as **managed** (never raw-only), and re-renders it on save. Plain
+`[[proxies]]` files remain valid and editable; adding/removing an individual
+proxy rule converts that client to plain blocks.
+
 - Toggle granularity: **per setup** in CLI (one prompt, default ON);
   **per rule** in the web wizard (each port/range row has its own TCP/UDP checkboxes).
 - Explosion guard: a range of >500 ports switches the CLI back to FRP's Go-template
@@ -293,7 +308,7 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | POST | `/api/services/{unit}/action` `{action: start\|stop\|restart}` | systemctl wrapper (whitelist) |
 | GET/POST | `/api/gre`, DELETE `/api/gre/{name}` | tunnel CRUD (writes `/root/frp/gre/<name>.env`, ensures units) |
 | GET | `/api/gre/{name}/mirror` | mirrored env for the remote node (copy-paste/CLI heredoc) |
-| GET | `/api/system/turbo`, POST `/api/system/turbo` | BBR/fq/sysctl state, apply/revert, ZRAM on/off + size, swap file size |
+| GET | `/api/system/turbo`, POST `/api/system/turbo` | BBR/fq/sysctl state, apply/revert, ZRAM on/off + size, and the three mikeesierrah utilities (`gc-cron`, `volatile-logs`, `clear-logs`) |
 | GET | `/api/monitor/latency` + `/api/monitor/latency/stream` | snapshot + SSE live probe feed |
 | GET | `/api/logs/units`, GET `/api/logs/stream?unit=…&since=…` | SSE journal tail (frps@*/frpc@*/gre/turbo/watchdog/panel units only) |
 | GET | `/api/stats?instance=…` | scraped frp webServer metrics + rolling history (conns, in/out bytes per proxy) |
@@ -348,6 +363,12 @@ P5 implementation notes:
   surface as `unit_error`); `zram-on {size, algo}` → CLI-byte-identical
   `zram.env` (`.bak` first) → `enable` + `restart frp-zram`; `zram-off`.
   Size/algo validated (128–32768 MB, lz4/zstd/lzo/lzo-rle).
+- `GET` also returns `gcCron {active, schedule, command}` parsed from
+  `frp-turbo gc-status`. `gc-cron` installs the idempotent 3h cron;
+  `volatile-logs` disables rsyslog and writes journald `Storage=volatile`,
+  `SystemMaxUse=50M`, `SystemKeepFree=5M`; `clear-logs` vacuums the journal,
+  truncates `/var/log/*.log` and `wtmp`/`btmp`, and removes rotated logs.
+  The same actions exist as `frp-manager turbo <action>`.
 
 P6 implementation notes:
 
@@ -458,10 +479,10 @@ P8 implementation notes:
 |---|---|
 | Login | centered card, one-time password notice, error shake, lockout hint |
 | Dashboard | node role badge (Iran/Foreign/standalone) + uptime; CPU/RAM/net sparklines; GRE + FRP status cards with quick restart; live latency chart (uPlot, per target); recent watchdog events |
-| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign/toml); edit always opens (raw modal for template/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **foreign** generates the one-click Foreign installer |
-| Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list (`8989,8443,2053`) with a single TCP / TCP+UDP selector (edit replaces the list in place); edit exposes `loginFailExit`, `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`, `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, TLS, per-proxy encryption/compression and restart-after-save; **Raw speed** toggle turns TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
+| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign-setup/toml); edit always opens (raw modal only for non-range templates/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **Foreign Setup** generates the one-click installer |
+| Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list with ranges (`8989,8443,6000-6005`) and a single TCP / TCP+UDP selector (edit replaces the list in place and keeps the compact `parseNumberRangePair` layout); edit exposes `loginFailExit`, `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`, `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, QUIC, TLS, per-proxy encryption/compression and restart-after-save; **Raw speed** forces TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
 | GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1400); **mirror-config** generator for the far node; delete with teardown confirmation |
-| Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); swap file card; GC cron status |
+| Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); **System utilities** card: 3h FRP GC cron (+ badge), volatile journald logs, clear all logs |
 | Logs | unit picker (frps@*/frpc@*/gre-turbo/watchdog), live SSE pane, pause/follow, level filter, colored timestamps |
 | Stats | per-instance: active conns, traffic in/out per proxy (from FRP webServer), 24 h history graph |
 | Backup | Export ZIP button (with include-secrets toggle); Import with category checkboxes (frp / gre / systemd / turbo / panel) + restore summary; watchdog toggle + interval + event log |
@@ -558,6 +579,12 @@ vm.swappiness = 10            # only when ZRAM/swap active
 
 Plus: `tcp_bbr` via `/etc/modules-load.d/bbr.conf` (unchanged), and the existing
 `0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps` GC cron ensured idempotently.
+
+**System utilities (Turbo tab / `frp-manager turbo …`):** `gc-cron` installs and
+verifies that 3h cron; `volatile-logs` disables rsyslog and configures journald
+(`Storage=volatile`, `SystemMaxUse=50M`, `SystemKeepFree=5M`); `clear-logs`
+vacuums the journal, truncates `/var/log/*.log`, `wtmp`, `btmp`, and deletes
+rotated `.gz`/`.1`–`.9` files. `gc-status` feeds the UI badge.
 
 **ZRAM (optional, default OFF):** `frp-turbo zram-on --size 2048 --algo lz4` →
 modprobe zram → `/sys/block/zram0/{comp_algorithm,disksize}` → `mkswap` → `swapon -p 100`;

@@ -39,7 +39,9 @@ type QUIC struct {
 
 // DefaultQUIC holds the tuning values the suite writes by default
 // (identical to the original script's choices).
-func DefaultQUIC() QUIC { return QUIC{KeepalivePeriod: 10, MaxIdleTimeout: 30, MaxIncomingStreams: 100000} }
+func DefaultQUIC() QUIC {
+	return QUIC{KeepalivePeriod: 10, MaxIdleTimeout: 30, MaxIncomingStreams: 100000}
+}
 
 // IsZero reports whether no QUIC tuning was decoded from the file.
 func (q QUIC) IsZero() bool { return q == QUIC{} }
@@ -92,7 +94,7 @@ type ClientConfig struct {
 		PoolCount               int    `toml:"poolCount"`
 		HeartbeatInterval       int    `toml:"heartbeatInterval"`
 		HeartbeatTimeout        int    `toml:"heartbeatTimeout"`
-		TLS struct {
+		TLS                     struct {
 			Enable bool `toml:"enable"`
 		} `toml:"tls"`
 		QUIC QUIC `toml:"quic"`
@@ -100,6 +102,18 @@ type ClientConfig struct {
 
 	WebServer WebServer `toml:"webServer"`
 	Proxies   []Proxy   `toml:"proxies"`
+
+	// RangeTemplate records that this client config is written with FRP's
+	// Go-template port expansion:
+	//
+	//	{{- range $_, $v := parseNumberRangePair "22,6000-6006" "22,6000-6006" }}
+	//
+	// Proxies always holds the expanded view so the panel can show and edit
+	// every forwarded port; RangeLocal/RangeRemote preserve the exact input
+	// lists so re-rendering keeps the compact, proven mikeesierrah layout.
+	RangeTemplate bool   `toml:"-"`
+	RangeLocal    string `toml:"-"`
+	RangeRemote   string `toml:"-"`
 }
 
 // Proxy is one [[proxies]] block in a client config.

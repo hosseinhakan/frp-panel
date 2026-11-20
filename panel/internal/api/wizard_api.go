@@ -267,7 +267,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	}
 	clientProto, _ := wizardClientProtocol(protoName)
 	if _, fs, ferr := buildForeignScript(foreignT, serverAddr, port, cfg.Auth.Token, clientProto, foreignScriptOptions{
-		Ports: "8989", Proto: "both", LocalIP: "127.0.0.1", ClientName: "client-" + itoa(port),
+		Ports: "8989", Proto: "tcp", LocalIP: "127.0.0.1", ClientName: "client-" + itoa(port),
 	}); ferr == nil {
 		resp["foreign_script"] = fs
 	} else {
@@ -405,7 +405,9 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
-	encrypt := !req.RawSpeed
+	// mikeesierrah profile: TLS/encryption/compression default off; the
+	// Raw Speed toggle remains available for callers that want to be explicit.
+	encrypt := false
 	cfg, err := frpconf.NewClientConfig(frpconf.ClientOptions{
 		ServerAddr:     mp.ServerAddr,
 		ServerPort:     mp.ControlPort,
@@ -414,7 +416,7 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		Ports:          specs,
 		Proto:          proto,
 		LocalIP:        localIP,
-		UseTLS:         !req.RawSpeed,
+		UseTLS:         false,
 		UseEncryption:  &encrypt,
 		UseCompression: false,
 		WebPort:        webPort,

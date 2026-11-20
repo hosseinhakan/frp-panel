@@ -82,20 +82,23 @@ IP**, at the same forwarded port.
    Foreign nodes.
 
    Copy the generated **mirror payload** (or the equivalent CLI command), or
-   skip the wizard on the Foreign host entirely and use the **1-click Foreign
-   setup** block in the result (also available as the **foreign** action on
-   every server row). It only needs root SSH on the Foreign server.
+   skip the wizard on the Foreign host entirely and use the **Foreign Setup**
+   block in the result (also available on every frps row). It only needs root
+   SSH on the Foreign server and accepts a port list with ranges
+   (`8989,8443,6000-6005`) plus an optional GRE `/30` (blank = auto-allocate
+   the next free `gtNN` / `10.100.NN.0/30`).
 2. **Foreign (exit)** — either paste the generated one-click Bash block, or run
    the same wizard on the Foreign node, choose **Foreign Node**, paste the
-   payload, and enter a comma-separated local port list (`8989,8443,2053`) plus
-   the TCP / TCP+UDP selector. Either path creates the mirrored GRE tunnel
-   (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without touching the
-   mirrored `/30`) and an `frpc` instance. Normal mode uses
-   `tls.enable = true` + per-proxy `useEncryption = true`; **Raw speed** sets
-   TLS/encryption/compression/tcpMux off for already-encrypted traffic
-   (VLESS/VMess/Hysteria). It then pings the Iran tunnel IP and reports the
-   frpc unit state, and allocates the loopback metrics `webServer` port the
-   watchdog uses for proxy health.
+   payload, and enter a comma-separated local port list
+   (`8989,8443,6000-6005`) plus the TCP / TCP+UDP selector. Either path creates
+   the mirrored GRE tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed
+   without touching the mirrored `/30`) and an `frpc` instance. Generated
+   configs use the proven `mikeesierrah` profile: `tls.enable = false`,
+   per-proxy `useEncryption = false`, compression off, compact
+   `parseNumberRangePair` port templates, `dial 10s / keepalive 120s / pool 20`
+   and `heartbeat 30s / timeout 90s`. It then pings the Iran tunnel IP and
+   reports the frpc unit state, and allocates the loopback metrics `webServer`
+   port the watchdog uses for proxy health.
 3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
    `1.2.3.4:443`).
 
@@ -134,6 +137,24 @@ writes exactly the same files; the wizard just does all three at once.
 
 Single-node usage works the same way — skip GRE and bind frps to `::`
 (dual-stack).
+
+### Config profile and maintenance
+
+Generated configs follow the proven `mikeesierrah/frp-script` profile: frps
+`heartbeatTimeout=90`, `tcpKeepalive=120`, `maxPoolCount=65535`, `tcpMux=false`;
+frpc `tls.enable=false`, per-proxy encryption/compression off, `dial 10/120`,
+`poolCount=20`, `heartbeat 30/90`, and compact `parseNumberRangePair` port
+templates. The Edit modal exposes every one of these fields (plus the QUIC
+block) and keeps both template and plain `[[proxies]]` configs editable.
+
+The **Turbo** tab adds three one-click maintenance actions (also
+`frp-manager turbo …`):
+
+| Action | API | CLI |
+|---|---|---|
+| FRP auto-GC cron (`0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps`) | `POST /api/system/turbo {"action":"gc-cron"}` | `frp-manager turbo gc-cron` |
+| Volatile logs (`Storage=volatile`, 50M/5M, rsyslog off) | `{"action":"volatile-logs"}` | `frp-manager turbo volatile-logs` |
+| Clear all system logs (journal + `/var/log` + wtmp/btmp) | `{"action":"clear-logs"}` | `frp-manager turbo clear-logs` |
 
 ## Layout
 

@@ -8,6 +8,8 @@
 package frpconf
 
 import (
+	"strings"
+
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -25,10 +27,16 @@ func ComposeServer(raw []byte, c *ServerConfig) ([]byte, error) {
 }
 
 // ComposeClient renders an existing client config. replaceProxies selects
-// whether cfg.Proxies replaces the [[proxies]] array (port edits) or the
-// original array is kept byte-for-byte in the parsed tree (connection-only
-// edits to a config with unknown proxy keys).
+// whether cfg.Proxies replaces the proxy list (port edits) or the original
+// list is kept byte-for-byte in the parsed tree (connection-only edits to a
+// config with unknown proxy keys).
 func ComposeClient(raw []byte, c *ClientConfig, replaceProxies bool) ([]byte, error) {
+	// Range templates cannot be decoded as TOML, so they take a dedicated
+	// path: merge any extra top-level keys, then append the canonical range
+	// blocks. This keeps the editor structural (never raw-only).
+	if c.RangeTemplate {
+		return ComposeRangeClient(raw, c)
+	}
 	_, unknown, err := Classify(raw, KindClient)
 	if err != nil {
 		return nil, err
@@ -37,6 +45,37 @@ func ComposeClient(raw []byte, c *ClientConfig, replaceProxies bool) ([]byte, er
 		return []byte(RenderClient(c)), nil
 	}
 	return MergeClient(raw, c, replaceProxies)
+}
+
+// ComposeRangeClient merges a range-template config. Unknown keys outside the
+// template block survive; the proxy block itself is always re-rendered from
+// the model so port edits remain deterministic.
+func ComposeRangeClient(raw []byte, c *ClientConfig) ([]byte, error) {
+	stripped, _, ok := stripRangeBlocks(raw)
+	if !ok {
+		// New file (or a plain config switched to template mode).
+		return []byte(RenderClient(c)), nil
+	}
+	var m map[string]any
+	if err := toml.Unmarshal(stripped, &m); err != nil {
+		return nil, err
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	unknown, _ := classifyClient(m)
+	if unknown == "" {
+		return []byte(RenderClient(c)), nil
+	}
+	applyClientTree(m, c, true)
+	delete(m, "proxies")
+	var b strings.Builder
+	renderClientProxies(&b, c)
+	out, err := toml.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(out, '\n'), []byte(b.String())...), nil
 }
 
 // MergeServer applies the managed server fields to raw's parsed TOML tree.
@@ -94,8 +133,22 @@ func MergeServer(raw []byte, c *ServerConfig) ([]byte, error) {
 func MergeClient(raw []byte, c *ClientConfig, replaceProxies bool) ([]byte, error) {
 	m, err := decodeTree(raw)
 	if err != nil {
+		// Converting a range template to plain proxies: merge the non-template
+		// remainder so extra keys survive the layout change.
+		if stripped, _, ok := stripRangeBlocks(raw); ok {
+			m, err = decodeTree(stripped)
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
+	applyClientTree(m, c, replaceProxies)
+	return toml.Marshal(m)
+}
+
+// applyClientTree writes every managed client field into an already-decoded
+// TOML tree, preserving unknown tables (log, plugins, extra proxy keys, …).
+func applyClientTree(m map[string]any, c *ClientConfig, replaceProxies bool) {
 	m["serverAddr"] = c.ServerAddr
 	m["serverPort"] = c.ServerPort
 	m["loginFailExit"] = c.LoginFailExit
@@ -144,7 +197,6 @@ func MergeClient(raw []byte, c *ClientConfig, replaceProxies bool) ([]byte, erro
 	if replaceProxies {
 		m["proxies"] = proxiesToTree(c.Proxies, m["proxies"])
 	}
-	return toml.Marshal(m)
 }
 
 func decodeTree(raw []byte) (map[string]any, error) {

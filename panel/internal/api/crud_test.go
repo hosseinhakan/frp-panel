@@ -403,20 +403,24 @@ func TestClientsCreateDualProtoAndCollision(t *testing.T) {
 		t.Errorf("proxies = %v, want 6", resp["proxies"])
 	}
 
-	// Secure transport defaults in the file.
+	// mikeesierrah transport defaults in the file: TLS off, encryption off,
+	// compression off, compact range template.
 	raw, _ := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
 	cfg, err := frpconf.ParseClient(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Transport.TLS.Enable {
-		t.Error("transport.tls.enable must default to true")
+	if cfg.Transport.TLS.Enable {
+		t.Error("transport.tls.enable must default to false (mikeesierrah profile)")
 	}
 	if cfg.Transport.Protocol != "tcp" {
 		t.Errorf("protocol = %q", cfg.Transport.Protocol)
 	}
+	if !cfg.RangeTemplate {
+		t.Error("new clients should use the compact parseNumberRangePair template")
+	}
 	for _, px := range cfg.Proxies {
-		if !px.Transport.UseEncryption || px.Transport.UseCompression {
+		if px.Transport.UseEncryption || px.Transport.UseCompression {
 			t.Errorf("proxy %s: encryption/compression defaults wrong", px.Name)
 		}
 	}
@@ -553,6 +557,46 @@ func TestClientProxiesAddReplaceDelete(t *testing.T) {
 	}
 }
 
+func TestClientEditKeepsRangeTemplate(t *testing.T) {
+	e := newTestEnv(t)
+	if rec := e.authorized(http.MethodPost, "/api/servers", `{"bindPort":7000}`); rec.Code != http.StatusCreated {
+		t.Fatalf("server create = %d", rec.Code)
+	}
+	if rec := e.authorized(http.MethodPost, "/api/clients",
+		`{"serverAddr":"10.100.111.2","serverPort":7000,"ports":"8989,8443","proto":"tcp"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("client create = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := e.authorized(http.MethodGet, "/api/clients/client-7000", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d: %s", rec.Code, rec.Body.String())
+	}
+	cfgMap, _ := jsonMap(t, rec)["config"].(map[string]any)
+	if cfgMap["rangeTemplate"] != true || cfgMap["portsSpec"] != "8989,8443" {
+		t.Errorf("detail range fields = %v / %v", cfgMap["rangeTemplate"], cfgMap["portsSpec"])
+	}
+
+	rec = e.authorized(http.MethodPut, "/api/clients/client-7000",
+		`{"ports":"8989,9443-9445","proto":"tcp","localIp":"127.0.0.1"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
+	cfg, err := frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RangeTemplate || cfg.RangeLocal != "8989,9443-9445" {
+		t.Errorf("range template lost: %+v", cfg)
+	}
+	if len(cfg.Proxies) != 4 {
+		t.Errorf("proxies = %d, want 4", len(cfg.Proxies))
+	}
+	if !strings.Contains(string(raw), `parseNumberRangePair "8989,9443-9445" "8989,9443-9445"`) {
+		t.Errorf("updated file lost the compact range:\n%s", raw)
+	}
+}
+
 func TestServerEditExposesAllTransportFields(t *testing.T) {
 	e := newTestEnv(t)
 	if rec := e.authorized(http.MethodPost, "/api/servers",
@@ -575,8 +619,8 @@ func TestServerEditExposesAllTransportFields(t *testing.T) {
 	}
 	for field, want := range map[string]float64{
 		"tcpMuxKeepaliveInterval": 10,
-		"heartbeatTimeout":        30,
-		"tcpKeepalive":            30,
+		"heartbeatTimeout":        90,
+		"tcpKeepalive":            120,
 		"maxPoolCount":            65535,
 		"quicKeepalivePeriod":     10,
 		"quicMaxIdleTimeout":      30,

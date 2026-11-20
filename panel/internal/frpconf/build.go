@@ -64,11 +64,11 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	c.Transport.HeartbeatTimeout = 30
+	c.Transport.HeartbeatTimeout = 90
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 30
+	c.Transport.TCPKeepalive = 120
 
 	c.Auth.Method = "token"
 	if o.Token == "" {
@@ -106,8 +106,8 @@ type ClientOptions struct {
 	Token          string // required (must match the frps token)
 	Protocol       string // "tcp" | "websocket" | "quic" | "kcp" (default tcp)
 	TCPMux         bool
-	UseTLS         bool  // default true (secure transport default)
-	UseEncryption  *bool // per-proxy encryption; nil = true (secure default)
+	UseTLS         bool  // default false (mikeesierrah profile: TLS off for speed)
+	UseEncryption  *bool // per-proxy encryption; nil = false (profile default)
 	UseCompression bool  // default false (saves RAM)
 	Ports          []PortSpec
 	Proto          ProtoToggle // default ProtoTCPAndUDP (dual TCP+UDP toggle)
@@ -116,10 +116,15 @@ type ClientOptions struct {
 	WebPort        int
 	WebUser        string
 	WebPassword    string
+	// PlainProxies opts out of the compact parseNumberRangePair template and
+	// emits one [[proxies]] block per port. The suite default is the template
+	// (the proven mikeesierrah profile), so zero-value callers get it.
+	PlainProxies bool
 }
 
-// NewClientConfig builds a ClientConfig with the suite's secure defaults:
-// TLS on, encryption on, compression off, paired tcp/udp proxies.
+// NewClientConfig builds a ClientConfig with the mikeesierrah profile:
+// TLS off, per-proxy encryption off, compression off, paired tcp/udp proxies
+// rendered through parseNumberRangePair so ranges stay compact.
 func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	if o.ServerAddr == "" {
 		return nil, errors.New("frpconf: client requires serverAddr")
@@ -152,11 +157,11 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.Protocol = o.Protocol
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
-	t.DialServerTimeout = 5
-	t.DialServerKeepalive = 30
-	t.PoolCount = 30
-	t.HeartbeatInterval = 10
-	t.HeartbeatTimeout = 30
+	t.DialServerTimeout = 10
+	t.DialServerKeepalive = 120
+	t.PoolCount = 20
+	t.HeartbeatInterval = 30
+	t.HeartbeatTimeout = 90
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 
@@ -177,11 +182,16 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 		c.WebServer = WebServer{Addr: o.WebAddr, Port: o.WebPort, User: o.WebUser, Password: o.WebPassword}
 	}
 
-	encrypt := true
+	encrypt := false
 	if o.UseEncryption != nil {
 		encrypt = *o.UseEncryption
 	}
 	c.Proxies = BuildProxies(o.Ports, o.Proto, o.LocalIP, encrypt, o.UseCompression)
+	if !o.PlainProxies && len(o.Ports) > 0 {
+		c.RangeTemplate = true
+		c.RangeLocal = FormatPortSpecs(o.Ports)
+		c.RangeRemote = c.RangeLocal
+	}
 	return c, nil
 }
 

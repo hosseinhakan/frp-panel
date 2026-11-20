@@ -23,8 +23,8 @@ type clientCreateReq struct {
 	Token          string `json:"token"`    // empty → reuse the single local server token
 	Protocol       string `json:"protocol"` // tcp | websocket | quic | kcp
 	TCPMux         *bool  `json:"tcpMux"`
-	UseTLS         *bool  `json:"useTls"`         // default true
-	UseEncryption  *bool  `json:"useEncryption"`  // default true
+	UseTLS         *bool  `json:"useTls"`         // default false (mikeesierrah profile)
+	UseEncryption  *bool  `json:"useEncryption"`  // default false (mikeesierrah profile)
 	UseCompression *bool  `json:"useCompression"` // default false
 	Ports          string `json:"ports"`          // "22,6000-6006"
 	Proto          string `json:"proto"`          // both | tcp | udp (default both)
@@ -47,6 +47,9 @@ type clientUpdateReq struct {
 	PoolCount               *int    `json:"poolCount"`
 	HeartbeatInterval       *int    `json:"heartbeatInterval"`
 	HeartbeatTimeout        *int    `json:"heartbeatTimeout"`
+	QUICKeepalivePeriod     *int    `json:"quicKeepalivePeriod"`
+	QUICMaxIdleTimeout      *int    `json:"quicMaxIdleTimeout"`
+	QUICMaxIncomingStreams  *int    `json:"quicMaxIncomingStreams"`
 	LoginFailExit           *bool   `json:"loginFailExit"`
 	UseTLS                  *bool   `json:"useTls"`
 	UseEncryption           *bool   `json:"useEncryption"`
@@ -81,7 +84,12 @@ type clientSummary struct {
 	PoolCount               int        `json:"poolCount"`
 	HeartbeatInterval       int        `json:"heartbeatInterval"`
 	HeartbeatTimeout        int        `json:"heartbeatTimeout"`
+	QUICKeepalivePeriod     int        `json:"quicKeepalivePeriod"`
+	QUICMaxIdleTimeout      int        `json:"quicMaxIdleTimeout"`
+	QUICMaxIncomingStreams  int        `json:"quicMaxIncomingStreams"`
 	LoginFailExit           bool       `json:"loginFailExit"`
+	PortsSpec               string     `json:"portsSpec"`
+	RangeTemplate           bool       `json:"rangeTemplate"`
 	WebPort                 int        `json:"webPort"`
 	TokenSet                bool       `json:"tokenSet"`
 	Proxies                 []proxyDTO `json:"proxies"`
@@ -134,7 +142,15 @@ func (s *Server) clientSummary(name string) clientSummary {
 		sum.PoolCount = cfg.Transport.PoolCount
 		sum.HeartbeatInterval = cfg.Transport.HeartbeatInterval
 		sum.HeartbeatTimeout = cfg.Transport.HeartbeatTimeout
+		sum.QUICKeepalivePeriod = cfg.Transport.QUIC.KeepalivePeriod
+		sum.QUICMaxIdleTimeout = cfg.Transport.QUIC.MaxIdleTimeout
+		sum.QUICMaxIncomingStreams = cfg.Transport.QUIC.MaxIncomingStreams
 		sum.LoginFailExit = cfg.LoginFailExit
+		sum.RangeTemplate = cfg.RangeTemplate
+		sum.PortsSpec = cfg.RangeLocal
+		if sum.PortsSpec == "" {
+			sum.PortsSpec = remotePortsSpec(cfg.Proxies)
+		}
 		sum.WebPort = cfg.WebServer.Port
 		sum.TokenSet = cfg.Auth.Token != ""
 		for _, p := range cfg.Proxies {
@@ -287,7 +303,8 @@ func (s *Server) handleClientsCreate(w http.ResponseWriter, r *http.Request) {
 	if req.WebEnabled != nil {
 		webEnabled = *req.WebEnabled
 	}
-	// Secure transport default: TLS on unless the wizard says otherwise.
+	// mikeesierrah profile: TLS off by default (the tunnel/VPN already
+	// encrypts), per-proxy encryption off, compression off.
 	opts := frpconf.ClientOptions{
 		ServerAddr:    req.ServerAddr,
 		ServerPort:    req.ServerPort,
@@ -296,7 +313,7 @@ func (s *Server) handleClientsCreate(w http.ResponseWriter, r *http.Request) {
 		Ports:         specs,
 		Proto:         proto,
 		LocalIP:       req.LocalIP,
-		UseTLS:        true,
+		UseTLS:        false,
 		UseEncryption: req.UseEncryption,
 		WebUser:       req.WebUser,
 		WebPassword:   req.WebPassword,
@@ -380,6 +397,25 @@ func (s *Server) allUsedPorts() (map[int]bool, error) {
 	return used, nil
 }
 
+// remotePortsSpec renders the proxy port list for the edit form. Range
+// templates carry RangeLocal verbatim; plain configs get a sorted list.
+func remotePortsSpec(proxies []frpconf.Proxy) string {
+	seen := map[int]bool{}
+	var ports []int
+	for _, p := range proxies {
+		if !seen[p.RemotePort] {
+			seen[p.RemotePort] = true
+			ports = append(ports, p.RemotePort)
+		}
+	}
+	sort.Ints(ports)
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = itoa(p)
+	}
+	return strings.Join(parts, ",")
+}
+
 // collide returns the sorted list of ports in specs already present in used.
 func collide(specs []frpconf.PortSpec, used map[int]bool) string {
 	var hits []int
@@ -443,7 +479,8 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 		replaceProxies = true
 	}
 	if req.Ports != nil && strings.TrimSpace(*req.Ports) != "" {
-		specs, perr := frpconf.ParsePortSpecs(*req.Ports)
+		portsInput := strings.TrimSpace(*req.Ports)
+		specs, perr := frpconf.ParsePortSpecs(portsInput)
 		if perr != nil {
 			writeErr(w, http.StatusBadRequest, "%v", perr)
 			return
@@ -484,12 +521,17 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, "remote port(s) already in use: %s", collides)
 			return
 		}
-		enc, comp := true, false
+		enc, comp := false, false
 		if len(cfg.Proxies) > 0 {
 			enc = cfg.Proxies[0].Transport.UseEncryption
 			comp = cfg.Proxies[0].Transport.UseCompression
 		}
 		cfg.Proxies = frpconf.BuildProxies(specs, proto, localIP, enc, comp)
+		// Keep the compact template layout when the file already uses it.
+		if cfg.RangeTemplate {
+			cfg.RangeLocal = portsInput
+			cfg.RangeRemote = portsInput
+		}
 	}
 
 	if req.ServerAddr != nil {
@@ -566,6 +608,27 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.Transport.HeartbeatTimeout = *req.HeartbeatTimeout
+	}
+	if req.QUICKeepalivePeriod != nil {
+		if err := checkRange("quic.keepalivePeriod", *req.QUICKeepalivePeriod, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.KeepalivePeriod = *req.QUICKeepalivePeriod
+	}
+	if req.QUICMaxIdleTimeout != nil {
+		if err := checkRange("quic.maxIdleTimeout", *req.QUICMaxIdleTimeout, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.MaxIdleTimeout = *req.QUICMaxIdleTimeout
+	}
+	if req.QUICMaxIncomingStreams != nil {
+		if err := checkRange("quic.maxIncomingStreams", *req.QUICMaxIncomingStreams, 1, 100000000); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.MaxIncomingStreams = *req.QUICMaxIncomingStreams
 	}
 	if req.LoginFailExit != nil {
 		cfg.LoginFailExit = *req.LoginFailExit
@@ -696,12 +759,15 @@ func (s *Server) handleClientProxiesAdd(w http.ResponseWriter, r *http.Request) 
 			localIP = "127.0.0.1"
 		}
 	}
-	enc := true
+	enc := false
 	if len(cfg.Proxies) > 0 {
 		enc = cfg.Proxies[0].Transport.UseEncryption
 	}
 	added := frpconf.BuildProxies(specs, proto, localIP, enc, proxyCompression(cfg))
 	cfg.Proxies = append(cfg.Proxies, added...)
+	// Per-port sets no longer fit a single range specification — emit plain
+	// [[proxies]] blocks from here on (the structured editor still works).
+	cfg.RangeTemplate = false
 
 	content, err := frpconf.ComposeClient(raw, cfg, true)
 	if err != nil {
@@ -770,7 +836,7 @@ func (s *Server) handleClientProxiesReplace(w http.ResponseWriter, r *http.Reque
 		var px frpconf.Proxy
 		px.Name, px.Type, px.LocalIP = p.Name, p.Type, p.LocalIP
 		px.LocalPort, px.RemotePort = p.LocalPort, p.RemotePort
-		px.Transport.UseEncryption = true
+		px.Transport.UseEncryption = false
 		if len(cfg.Proxies) > 0 {
 			px.Transport.UseEncryption = cfg.Proxies[0].Transport.UseEncryption
 		}
@@ -778,6 +844,7 @@ func (s *Server) handleClientProxiesReplace(w http.ResponseWriter, r *http.Reque
 		proxies = append(proxies, px)
 	}
 	cfg.Proxies = proxies
+	cfg.RangeTemplate = false
 
 	content, err := frpconf.ComposeClient(raw, cfg, true)
 	if err != nil {
@@ -836,6 +903,7 @@ func (s *Server) handleClientProxiesDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	cfg.Proxies = kept
+	cfg.RangeTemplate = false
 
 	content, err := frpconf.ComposeClient(raw, cfg, true)
 	if err != nil {

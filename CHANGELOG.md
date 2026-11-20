@@ -1,6 +1,26 @@
 # Changelog
 
-## v1.2.3 — full transport editors + one-click Foreign installer
+## v1.2.3 — mikeesierrah profile, full editors + one-click Foreign installer
+
+### Config profile (`frpconf`)
+
+- Generated/edited configs now match the proven `mikeesierrah/frp-script`
+  profile exactly:
+  - **frps**: `heartbeatTimeout = 90`, `maxPoolCount = 65535`, `tcpMux = false`,
+    `tcpMuxKeepaliveInterval = 10`, `tcpKeepalive = 120`, QUIC
+    `10 / 30 / 100000`, `auth.method = "token"`.
+  - **frpc**: `loginFailExit = false`, `protocol = "tcp"`, `tcpMux = false`,
+    `tcpMuxKeepaliveInterval = 10`, `dialServerTimeout = 10`,
+    `dialServerKeepalive = 120`, `poolCount = 20`, `heartbeatInterval = 30`,
+    `heartbeatTimeout = 90`, `tls.enable = false`, QUIC `10 / 30 / 100000`,
+    per-proxy `useEncryption = false`, `useCompression = false`.
+- Ports are rendered with FRP's compact
+  `{{- range $_, $v := parseNumberRangePair "..." "..." }}` template (TCP and,
+  when selected, UDP). Existing plain `[[proxies]]` files and range templates
+  are both parsed structurally, and ranges such as `22,6000-6006,8443` are
+  editable in the form without switching to Raw TOML.
+- Editing a range template keeps the compact layout; adding/removing individual
+  proxy rules converts that client to plain blocks so the result is exact.
 
 ### Editing
 
@@ -9,31 +29,46 @@
   round-trips unchanged. Opening `server-7018` with `bindAddr = "0.0.0.0"` no
   longer shows or saves `::`.
 - The frps editor exposes every transport tunable: `bindAddr`, `bindPort`,
-  `auth.token` (generate/copy), protocol (QUIC/KCP/none), `tcpMux`,
+  `auth.token` (generate/copy), protocol (QUIC/KCP/plain TCP), `tcpMux`,
   `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`,
   `maxPoolCount` and the QUIC `keepalivePeriod` / `maxIdleTimeout` /
   `maxIncomingStreams` block.
 - The frpc editor exposes `serverAddr`, `serverPort`, `protocol`, `tcpMux`,
   `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`,
   `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, `loginFailExit`,
-  `tls.enable`, forwarded ports / `proto` / `localIP`, per-proxy encryption and
-  compression, plus the Raw Speed preset.
+  `tls.enable`, the QUIC block, forwarded ports / ranges / `proto` / `localIP`,
+  per-proxy encryption and compression, plus the Raw Speed preset.
 - Both editors have **Restart service after save** (checked by default when the
   unit is active); unchecking writes the file without touching the running unit.
 - Both editors keep a **Raw TOML** shortcut, and unknown keys are still
   preserved on structured saves.
 
+### Turbo → System utilities
+
+- **FRP auto-GC cron** — one click installs/verifies
+  `0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps` in root's crontab (Go GC
+  without dropping connections) and shows an active/missing badge.
+- **Volatile logs** — disables rsyslog and sets journald
+  `Storage=volatile`, `SystemMaxUse=50M`, `SystemKeepFree=5M`.
+- **Clear all system logs** — `journalctl --vacuum-time=1s`, truncates
+  `/var/log/*.log`, `wtmp`, `btmp`, and deletes rotated `.gz` / `.1`–`.9` logs.
+- All three are available in the Web UI, the JSON API
+  (`POST /api/system/turbo {action}`), and the CLI
+  (`frp-manager turbo gc-cron|volatile-logs|clear-logs`).
+
 ### Foreign node provisioning
 
-- Every frps row now has a **foreign** action, and the Iran wizard result
+- Every frps row has a **Foreign Setup** action, and the Iran wizard result
   includes a **1-click Foreign setup** block. It takes the Foreign public IP,
-  forwarded ports (`8989` default) and a Raw Speed toggle.
+  ports/ranges (`8989` default), TCP/`both`, Local IP, and an optional GRE
+  `/30` (blank = auto-allocate the next free `gtNN` / `10.100.NN.0/30`).
 - The generated block is entirely self-contained (root SSH only): it installs
   the GRE helper + systemd units, creates the mirrored tunnel (`ip tunnel add
   … mode gre … ttl 255`, MTU 1400, `/30` address, `rp_filter=0`, NOTRACK proto
-  47, TCPMSS clamp), downloads `frpc` when missing, writes
-  `/root/frp/client/<name>.toml` with the Iran GRE IP / port / token / exact
-  transport settings, enables both units and verifies with `ping` +
+  47, TCPMSS clamp), downloads `frpc` and installs `frpc@.service` when missing,
+  writes `/root/frp/client/<name>.toml` with the Iran GRE IP / port / token /
+  mikeesierrah transport settings and the compact range template, applies
+  BBR+fq and the 3h GC cron, enables both units and verifies with `ping` +
   `systemctl is-active`.
 - Copy works on plain `http://<ip>:9000` through the textarea +
   `execCommand('copy')` fallback already used elsewhere in the panel.

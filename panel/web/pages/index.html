@@ -485,9 +485,8 @@
                             <div class="field">
                               <label>Forward as</label>
                               <select class="select" x-model="rev.foreignProto">
-                                <option value="both">TCP + UDP</option>
                                 <option value="tcp">TCP only</option>
-                                <option value="udp">UDP only</option>
+                                <option value="both">TCP + UDP</option>
                               </select>
                             </div>
                           </div>
@@ -745,7 +744,7 @@
                     <div class="field">
                       <label>heartbeatTimeout</label>
                       <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
-                      <span class="hint">seconds · 30 fast / 90 relaxed</span>
+                      <span class="hint">seconds · mikeesierrah profile: 90</span>
                     </div>
                   </div>
                   <div class="row mt05">
@@ -757,7 +756,7 @@
                       <div class="field">
                         <label>tcpKeepalive</label>
                         <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.tcpKeepalive">
-                        <span class="hint">seconds · 30 fast / 120 relaxed</span>
+                        <span class="hint">seconds · mikeesierrah profile: 120</span>
                       </div>
                       <div class="field">
                         <label>maxPoolCount</label>
@@ -844,15 +843,14 @@
                   </div>
                   <div class="field-row mt05">
                     <div class="field">
-                      <label>Ports (comma separated)</label>
-                      <input class="input mono" x-model="foreign.ports" placeholder="8989,8443">
+                      <label>Ports / ranges</label>
+                      <input class="input mono" x-model="foreign.ports" placeholder="8989,8443,6000-6005">
                     </div>
                     <div class="field">
-                      <label>Forward as</label>
+                      <label>Protocol</label>
                       <select class="select" x-model="foreign.proto">
-                        <option value="both">TCP + UDP</option>
                         <option value="tcp">TCP only</option>
-                        <option value="udp">UDP only</option>
+                        <option value="both">TCP + UDP</option>
                       </select>
                     </div>
                     <div class="field">
@@ -860,8 +858,8 @@
                       <input class="input mono" x-model="foreign.localIp" placeholder="127.0.0.1">
                     </div>
                     <div class="field">
-                      <label>GRE subnet (when unlinked)</label>
-                      <input class="input mono" x-model="foreign.subnet" placeholder="10.100.111.0/30">
+                      <label>GRE /30 (blank = auto)</label>
+                      <input class="input mono" x-model="foreign.subnet" placeholder="next free 10.100.NN.0/30">
                     </div>
                   </div>
                   <div class="row mt1">
@@ -877,8 +875,8 @@
                       <div class="row mt1">
                         <span class="pill ok mono" x-text="'frpc@' + foreign.result.clientName + ' → ' + foreign.result.serverAddr + ':' + foreign.result.serverPort"></span>
                         <span class="pill idle mono" x-text="foreign.result.iface + ' · ' + foreign.result.foreignPrivateIp + ' ↔ ' + foreign.result.iranPrivateIp"></span>
-                        <span class="pill" :class="foreign.result.rawSpeed ? 'warn' : 'ok'"
-                              x-text="foreign.result.rawSpeed ? 'raw speed' : 'tls + encryption'"></span>
+                        <span class="pill" :class="foreign.result.tls || foreign.result.encryption ? 'ok' : 'warn'"
+                              x-text="foreign.result.tls || foreign.result.encryption ? 'TLS / encryption on' : 'TLS off · mikeesierrah profile'"></span>
                       </div>
                       <p class="navgroup-label mt1">paste on the Foreign server as root</p>
                       <pre class="logpane" x-text="foreign.result.script"></pre>
@@ -1103,10 +1101,10 @@
                       <input class="input mono" x-model="wiz.localIp">
                     </div>
                   </div>
-                  <div class="field mt05">
+                  <div class="field">
                     <label>Ports / ranges</label>
-                    <input class="input mono" x-model="wiz.ports" placeholder="8989,8443,2053">
-                    <span class="hint">comma-separated ports or ranges — each port emits tcp-<em>p</em> and, when selected, udp-<em>p</em></span>
+                    <input class="input mono" x-model="wiz.ports" placeholder="8989,8443,6000-6005">
+                    <span class="hint">comma-separated ports or ranges — saved as a compact parseNumberRangePair template; each port emits tcp-<em>p</em> and, when selected, udp-<em>p</em></span>
                   </div>
                   <div class="field mt05">
                     <label>Protocol emission</label>
@@ -1170,8 +1168,9 @@
                   </div>
                   <div class="field-row mt05">
                     <div class="field">
-                      <label>Forwarded ports (comma separated)</label>
-                      <input class="input mono" x-model="edit.ports" placeholder="8989,8443,2053">
+                      <label>Forwarded ports / ranges</label>
+                      <input class="input mono" x-model="edit.ports" placeholder="8989,8443,6000-6005">
+                      <span class="hint">comma list; ranges stay compact via parseNumberRangePair</span>
                     </div>
                     <div class="field">
                       <label>Forward as</label>
@@ -1216,7 +1215,21 @@
                         <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
                       </div>
                     </div>
-                    <p class="faint small mt05">Fast anti-stall defaults: keepalive 10s / heartbeat 10s / timeout 30s / pool 30.</p>
+                    <div class="field-row mt05">
+                      <div class="field">
+                        <label>quic.keepalivePeriod</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.quicKeepalivePeriod">
+                      </div>
+                      <div class="field">
+                        <label>quic.maxIdleTimeout</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.quicMaxIdleTimeout">
+                      </div>
+                      <div class="field">
+                        <label>quic.maxIncomingStreams</label>
+                        <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
+                      </div>
+                    </div>
+                    <p class="faint small mt05">mikeesierrah profile: dial 10s / keepalive 120s / pool 20 / heartbeat 30s / timeout 90s / QUIC 10·30·100000.</p>
                   </details>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>
@@ -1230,6 +1243,10 @@
                     <label class="check"><input type="checkbox" x-model="edit.useCompression" :disabled="edit.rawSpeed"> compression</label>
                     <label class="check"><input type="checkbox" x-model="edit.tcpMux" :disabled="edit.rawSpeed"> tcpMux</label>
                   </div>
+                  <p class="faint small mt05">
+                    Compression significantly increases RAM usage — leave it off unless the link is CPU-cheap.
+                    The mikeesierrah profile ships TLS, FRP encryption and compression off.
+                  </p>
                   <div class="row mt1">
                     <label class="check"><input type="checkbox" x-model="edit.restart"> Restart service after save</label>
                     <span class="faint small">uncheck to write the file without touching the running unit</span>
@@ -1533,6 +1550,41 @@
                 </div>
               </template>
             </div>
+
+            <template x-if="state">
+              <div class="card mt1">
+                <div class="card-head">
+                  <h2>System utilities</h2>
+                  <div class="grow"></div>
+                  <span class="pill" :class="gcCron && gcCron.active ? 'ok' : 'idle'"
+                        x-text="gcCron && gcCron.active ? 'GC cron active' : 'GC cron missing'"></span>
+                </div>
+                <p class="muted small">
+                  The proven mikeesierrah maintenance actions. Each is idempotent and safe to re-run.
+                </p>
+                <div class="utilrow mt1">
+                  <div>
+                    <strong>FRP auto-GC cron</strong>
+                    <p class="faint small">Installs <span class="mono">0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps</span> in root's crontab. The signal triggers Go garbage collection without dropping live connections.</p>
+                  </div>
+                  <button class="btn" :disabled="busy" @click="gcCronRun()">Install / verify</button>
+                </div>
+                <div class="utilrow mt1">
+                  <div>
+                    <strong>Volatile logs (reduce disk I/O)</strong>
+                    <p class="faint small">Disables rsyslog and sets journald to <span class="mono">Storage=volatile</span>, <span class="mono">SystemMaxUse=50M</span>, <span class="mono">SystemKeepFree=5M</span>.</p>
+                  </div>
+                  <button class="btn" :disabled="busy" @click="volatileLogs()">Apply</button>
+                </div>
+                <div class="utilrow mt1">
+                  <div>
+                    <strong>Clear all system logs</strong>
+                    <p class="faint small">Vacuums the journal, truncates <span class="mono">/var/log/*.log</span>, <span class="mono">wtmp</span>/<span class="mono">btmp</span> and removes rotated <span class="mono">.gz</span>/<span class="mono">.1</span>–<span class="mono">.9</span> files. Permanent.</p>
+                  </div>
+                  <button class="btn danger" :disabled="busy" @click="clearLogs()">Clear logs</button>
+                </div>
+              </div>
+            </template>
           </section>
         </template>
 

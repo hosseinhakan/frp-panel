@@ -363,7 +363,8 @@ ensure_turbo_assets() {
 # actually loaded, so the script never fails on hosts without it.
 # Canonical copy: panel/internal/assets/helpers/frp-turbo (also embedded in frp-panel).
 #
-# Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status
+# Usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status|
+#                   gc-cron|gc-status|volatile-logs|clear-logs
 set -euo pipefail
 
 SYSCTL_DROPIN="/etc/sysctl.d/99-tunnel-turbo.conf"
@@ -373,7 +374,7 @@ ZRAM_ENV="/etc/frp-panel/zram.env"
 GC_CRON="0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps"
 
 usage() {
-    echo "usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status" >&2
+    echo "usage: frp-turbo apply|revert|status|zram-on|zram-off|zram-status|gc-cron|gc-status|volatile-logs|clear-logs" >&2
     exit 2
 }
 
@@ -493,6 +494,55 @@ cmd_zram_status() {
         || echo "frp-turbo: no zram swap active"
 }
 
+# ---- mikeesierrah utilities --------------------------------------------------
+
+cmd_gc_cron() {
+    ensure_gc_cron
+    cmd_gc_status
+}
+
+cmd_gc_status() {
+    if crontab -l 2>/dev/null | grep -Fq "$GC_CRON"; then
+        echo "frp-turbo: gc-cron=active"
+    else
+        echo "frp-turbo: gc-cron=missing"
+    fi
+}
+
+journald_set() { # journald_set KEY VALUE
+    local key="$1" value="$2" file="/etc/systemd/journald.conf"
+    mkdir -p /etc/systemd
+    touch "$file"
+    if grep -Eq "^[#[:space:]]*${key}=" "$file"; then
+        sed -i "s|^[#[:space:]]*${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+cmd_volatile_logs() {
+    # Reduce disk I/O: logs live in memory. rsyslog is optional on minimal
+    # images, so a missing/disabled rsyslog is not an error.
+    systemctl disable --now rsyslog >/dev/null 2>&1 || true
+    journald_set Storage volatile
+    journald_set SystemMaxUse 50M
+    journald_set SystemKeepFree 5M
+    systemctl restart systemd-journald
+    echo "frp-turbo: journald volatile (Storage=volatile, SystemMaxUse=50M, SystemKeepFree=5M); rsyslog disabled"
+}
+
+cmd_clear_logs() {
+    journalctl --vacuum-time=1s >/dev/null 2>&1 || true
+    find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; 2>/dev/null || true
+    find /var/log -type f -name "*.log.*" -delete 2>/dev/null || true
+    find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.2" -o -name "*.3" \
+        -o -name "*.4" -o -name "*.5" -o -name "*.6" -o -name "*.7" -o -name "*.8" \
+        -o -name "*.9" \) -delete 2>/dev/null || true
+    truncate -s 0 /var/log/wtmp 2>/dev/null || true
+    truncate -s 0 /var/log/btmp 2>/dev/null || true
+    echo "frp-turbo: system logs cleared (journal vacuumed, rotated logs removed)"
+}
+
 case "${1:-}" in
     apply) cmd_apply ;;
     revert) cmd_revert ;;
@@ -500,6 +550,10 @@ case "${1:-}" in
     zram-on) cmd_zram_on ;;
     zram-off) cmd_zram_off ;;
     zram-status) cmd_zram_status ;;
+    gc-cron) cmd_gc_cron ;;
+    gc-status) cmd_gc_status ;;
+    volatile-logs) cmd_volatile_logs ;;
+    clear-logs) cmd_clear_logs ;;
     *) usage ;;
 esac
 ASSET_FRP_TURBO
@@ -929,14 +983,16 @@ zram_off() {
     print_success "ZRAM disabled."
 }
 
-# Reduce I/O by disabling rsyslog and making journald volatile (v1, unchanged)
+# Reduce I/O by disabling rsyslog and making journald volatile (canonical
+# helper: idempotent journald.conf edit + restart).
 reduce_io() {
     print_info "Reducing I/O by logging only to memory..."
-    sudo systemctl disable --now rsyslog && sudo sed -i 's/^#Storage=.*/Storage=volatile/' /etc/systemd/journald.conf && sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf && sudo sed -i 's/^#SystemKeepFree=.*/SystemKeepFree=5M/' /etc/systemd/journald.conf && sudo systemctl restart systemd-journald
+    ensure_turbo_assets
+    /usr/local/bin/frp-turbo volatile-logs
     print_success "I/O reduced - logs are now stored in volatile memory."
 }
 
-# Remove all system logs (v1, unchanged)
+# Remove all system logs (canonical helper: journal vacuum, truncate, rotate).
 remove_logs() {
     print_warning "This will permanently delete all system logs!"
     read -p "Are you sure you want to continue? (yes/no): " confirm
@@ -946,23 +1002,16 @@ remove_logs() {
         return
     fi
 
-    print_info "Removing all system logs..."
-
-    # Clear journal logs
-    sudo journalctl --vacuum-time=1s
-
-    # Remove log files in /var/log
-    sudo find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; 2>/dev/null
-    sudo find /var/log -type f -name "*.log.*" -delete 2>/dev/null
-
-    # Remove other common log locations
-    sudo find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.2" -o -name "*.3" -o -name "*.4" -o -name "*.5" -o -name "*.6" -o -name "*.7" -o -name "*.8" -o -name "*.9" \) -delete 2>/dev/null
-
-    # Clear wtmp and btmp logs
-    sudo truncate -s 0 /var/log/wtmp 2>/dev/null
-    sudo truncate -s 0 /var/log/btmp 2>/dev/null
-
+    ensure_turbo_assets
+    /usr/local/bin/frp-turbo clear-logs
     print_success "All system logs have been removed."
+}
+
+# Idempotent 3h FRP GC cron (pkill -10 triggers Go GC, keeps connections).
+gc_cron() {
+    ensure_turbo_assets
+    /usr/local/bin/frp-turbo gc-cron
+    print_success "FRP GC cron (every 3h) is installed."
 }
 
 # Utilities menu (item 7 — same slot as v1, now Turbo-aware)
@@ -977,10 +1026,11 @@ utilities_menu() {
         echo "2) Configure ZRAM (default 2048MB lz4)"
         echo "3) OS logs Only In Memory (Reduce disk I/O)"
         echo "4) Remove All System logs (Clears Storage)"
-        echo "5) Back to Main Menu"
+        echo "5) Install / verify FRP GC cron (every 3h)"
+        echo "6) Back to Main Menu"
         echo
 
-        read -p "Choose an option [1-5]: " util_choice
+        read -p "Choose an option [1-6]: " util_choice
         echo
 
         case $util_choice in
@@ -1010,10 +1060,14 @@ utilities_menu() {
                 pause
                 ;;
             5)
+                gc_cron
+                pause
+                ;;
+            6)
                 return
                 ;;
             *)
-                print_error "Invalid option. Please choose 1-5."
+                print_error "Invalid option. Please choose 1-6."
                 pause
                 ;;
         esac
@@ -1235,11 +1289,11 @@ setup_server() {
         fi
         echo
 
-        echo "transport.heartbeatTimeout = 30"
+        echo "transport.heartbeatTimeout = 90"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = $( [[ $use_mux =~ ^[Yy]$ ]] && echo true || echo false )"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 30"
+        echo "transport.tcpKeepalive = 120"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -1381,13 +1435,14 @@ setup_client() {
     use_compression=${use_compression:-n}
     compression_enabled=$([[ $use_compression =~ ^[Yy]$ ]] && echo true || echo false)
 
-    # NEW: secure transport defaults
-    read -p "Enable TLS transport (y/n) [y]: " use_tls
-    use_tls=${use_tls:-y}
+    # mikeesierrah profile: TLS/encryption off by default (the tunnel/VPN
+    # already encrypts); both remain toggleable.
+    read -p "Enable TLS transport (y/n) [n]: " use_tls
+    use_tls=${use_tls:-n}
     tls_enabled=$([[ $use_tls =~ ^[Yy]$ ]] && echo true || echo false)
 
-    read -p "Enable per-proxy encryption (y/n) [y]: " use_enc
-    use_enc=${use_enc:-y}
+    read -p "Enable per-proxy encryption (y/n) [n]: " use_enc
+    use_enc=${use_enc:-n}
     enc_enabled=$([[ $use_enc =~ ^[Yy]$ ]] && echo true || echo false)
 
     # NEW: dual TCP+UDP forwarding toggle
@@ -1463,11 +1518,11 @@ auth.token = "$auth_token"
 transport.protocol = "$transport"
 transport.tcpMux = $mux
 transport.tcpMuxKeepaliveInterval = 10
-transport.dialServerTimeout = 5
-transport.dialServerKeepalive = 30
-transport.poolCount = 30
-transport.heartbeatInterval = 10
-transport.heartbeatTimeout = 30
+transport.dialServerTimeout = 10
+transport.dialServerKeepalive = 120
+transport.poolCount = 20
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
 transport.tls.enable = $tls_enabled
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
@@ -1513,11 +1568,11 @@ EOF
             echo "transport.protocol = \"$transport\""
             echo "transport.tcpMux = $mux"
             echo "transport.tcpMuxKeepaliveInterval = 10"
-            echo "transport.dialServerTimeout = 5"
-            echo "transport.dialServerKeepalive = 30"
-            echo "transport.poolCount = 30"
-            echo "transport.heartbeatInterval = 10"
-            echo "transport.heartbeatTimeout = 30"
+            echo "transport.dialServerTimeout = 10"
+            echo "transport.dialServerKeepalive = 120"
+            echo "transport.poolCount = 20"
+            echo "transport.heartbeatInterval = 30"
+            echo "transport.heartbeatTimeout = 90"
             echo "transport.tls.enable = $tls_enabled"
             echo "transport.quic.keepalivePeriod = 10"
             echo "transport.quic.maxIdleTimeout = 30"
@@ -2365,11 +2420,11 @@ reverse_iran_do() {
             echo "# transport.quic.maxIncomingStreams = 100000"
         fi
         echo
-        echo "transport.heartbeatTimeout = 30"
+        echo "transport.heartbeatTimeout = 90"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 30"
+        echo "transport.tcpKeepalive = 120"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -2468,12 +2523,12 @@ reverse_foreign_do() {
         echo "transport.protocol = \"$protoname\""
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.dialServerTimeout = 5"
-        echo "transport.dialServerKeepalive = 30"
-        echo "transport.poolCount = 30"
-        echo "transport.heartbeatInterval = 10"
-        echo "transport.heartbeatTimeout = 30"
-        echo "transport.tls.enable = true"
+        echo "transport.dialServerTimeout = 10"
+        echo "transport.dialServerKeepalive = 120"
+        echo "transport.poolCount = 20"
+        echo "transport.heartbeatInterval = 30"
+        echo "transport.heartbeatTimeout = 90"
+        echo "transport.tls.enable = false"
         echo "transport.quic.keepalivePeriod = 10"
         echo "transport.quic.maxIdleTimeout = 30"
         echo "transport.quic.maxIncomingStreams = 100000"
@@ -2493,7 +2548,7 @@ reverse_foreign_do() {
                 echo "localIP = \"$localip\""
                 echo "localPort = $p"
                 echo "remotePort = $p"
-                echo "transport.useEncryption = true"
+                echo "transport.useEncryption = false"
                 echo "transport.useCompression = false"
             fi
             if [[ "$proto_mode" == "both" || "$proto_mode" == "udp" ]]; then
@@ -2504,7 +2559,7 @@ reverse_foreign_do() {
                 echo "localIP = \"$localip\""
                 echo "localPort = $p"
                 echo "remotePort = $p"
-                echo "transport.useEncryption = true"
+                echo "transport.useEncryption = false"
                 echo "transport.useCompression = false"
             fi
         done
@@ -3589,8 +3644,12 @@ turbo_cli() {
             ;;
         zram-off) zram_off ;;
         zram-status) /usr/local/bin/frp-turbo zram-status 2>/dev/null || print_warning "frp-turbo not installed" ;;
+        gc-cron|gc-status|volatile-logs|clear-logs)
+            ensure_turbo_assets
+            /usr/local/bin/frp-turbo "$action"
+            ;;
         *)
-            print_error "usage: frp-manager turbo apply|revert|status|zram-on|zram-off|zram-status"
+            print_error "usage: frp-manager turbo apply|revert|status|zram-on|zram-off|zram-status|gc-cron|gc-status|volatile-logs|clear-logs"
             exit 1
             ;;
     esac

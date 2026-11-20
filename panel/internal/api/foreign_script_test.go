@@ -31,6 +31,9 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		resp["serverPort"] != float64(7025) {
 		t.Errorf("routing metadata = %v", resp)
 	}
+	if resp["tls"] != false || resp["encryption"] != false {
+		t.Errorf("profile must default TLS/encryption off: tls=%v encryption=%v", resp["tls"], resp["encryption"])
+	}
 	script, _ := resp["script"].(string)
 	for _, want := range []string{
 		"FRP_FOREIGN_SETUP",
@@ -49,9 +52,16 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"transport.useEncryption = false",
 		"transport.useCompression = false",
 		"transport.tcpMux = false",
-		`name = "tcp-8989"`,
-		`name = "tcp-8443"`,
+		`parseNumberRangePair "8989,8443" "8989,8443"`,
+		`name = "tcp-{{ $v.First }}"`,
+		"transport.dialServerTimeout = 10",
+		"transport.dialServerKeepalive = 120",
+		"transport.poolCount = 20",
+		"transport.heartbeatInterval = 30",
+		"transport.heartbeatTimeout = 90",
 		"/usr/local/bin/frpc",
+		"net.core.default_qdisc=fq", // BBR + fq tuning
+		"pkill -10 -x frpc",         // 3h GC cron
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("foreign script missing %q:\n%s", want, script)

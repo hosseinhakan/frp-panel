@@ -792,6 +792,11 @@ document.addEventListener("alpine:init", () => {
         clientName: "",
         token: "",
         rawSpeed: false,
+        foreignPorts: "8989",
+        foreignProto: "both",
+        foreignRawSpeed: false,
+        foreignBusy: false,
+        foreignError: "",
         enableWatchdog: true,
         busy: false,
         error: "",
@@ -880,6 +885,34 @@ document.addEventListener("alpine:init", () => {
       r.busy = false;
     },
 
+    async revGenForeign() {
+      const r = this.rev;
+      if (!r || !r.result || r.role !== "iran") return;
+      r.foreignBusy = true;
+      r.foreignError = "";
+      try {
+        const d = await FRP.api(
+          `/api/servers/${encodeURIComponent(r.result.server.name)}/foreign-script`,
+          {
+            method: "POST",
+            body: {
+              foreignPublicIp: r.foreignPublicIp.trim(),
+              iranPublicIp: r.iranPublicIp.trim(),
+              iface: r.iface.trim(),
+              ports: r.foreignPorts.trim(),
+              proto: r.foreignProto,
+              localIp: "127.0.0.1",
+              rawSpeed: !!r.foreignRawSpeed,
+            },
+          }
+        );
+        r.result.foreign_script = d.script;
+      } catch (e) {
+        r.foreignError = e.message;
+      }
+      r.foreignBusy = false;
+    },
+
     async revCopy(text) {
       const ok = await FRP.copy(text || "");
       this.$store.ui.push(
@@ -895,18 +928,21 @@ document.addEventListener("alpine:init", () => {
     rows: [],
     loading: true,
     greIPs: [],
+    tunnels: [],
 
     wiz: null,
     edit: null,
     raw: null,
     regen: null,
     once: null,
+    foreign: null,
 
     async init() {
       await this.load();
       FRP.api("/api/gre")
         .then((d) => {
-          this.greIPs = (d.tunnels || [])
+          this.tunnels = d.tunnels || [];
+          this.greIPs = this.tunnels
             .map((t) => (t.local_private_ip || "").split("/")[0])
             .filter(Boolean);
         })
@@ -923,12 +959,14 @@ document.addEventListener("alpine:init", () => {
       this.loading = false;
     },
 
+    // bindChoices feeds the editable datalist. The bind field itself is a
+    // plain text input, so any current value (0.0.0.0, ::, a GRE IP or a
+    // custom address) round-trips exactly and is never silently replaced.
     bindChoices() {
       return [
         { v: "::", label: ":: — dual-stack (recommended)" },
         { v: "0.0.0.0", label: "0.0.0.0 — IPv4 only" },
         ...this.greIPs.map((ip) => ({ v: ip, label: ip + " — GRE tunnel IP" })),
-        { v: "custom", label: "custom address…" },
       ];
     },
 
@@ -937,7 +975,6 @@ document.addEventListener("alpine:init", () => {
         name: "",
         bindPort: 7000,
         bindAddr: "::",
-        customBind: "",
         protocol: "quic",
         tcpMux: false,
         token: FRP.genToken(),
@@ -953,14 +990,13 @@ document.addEventListener("alpine:init", () => {
       if (!w) return;
       w.busy = true;
       w.error = "";
-      const bind = w.bindAddr === "custom" ? w.customBind.trim() : w.bindAddr;
       try {
         const resp = await FRP.api("/api/servers", {
           method: "POST",
           body: {
             name: w.name.trim() || undefined,
             bindPort: Number(w.bindPort),
-            bindAddr: bind,
+            bindAddr: w.bindAddr.trim(),
             protocol: w.protocol,
             tcpMux: w.tcpMux,
             token: w.genToken ? w.token : "",
@@ -1000,17 +1036,22 @@ document.addEventListener("alpine:init", () => {
           await this.openRaw(name);
           return;
         }
-        const bind = c.bindAddr || "::";
-        const known = this.bindChoices().some((x) => x.v === bind && x.v !== "custom");
         this.edit = {
           name,
           style,
           bindPort: c.bindPort || 7000,
-          bindAddr: known ? bind : "custom",
-          customBind: known ? "" : bind,
+          bindAddr: c.bindAddr || "::", // exact value — never a preset guess
           protocol: c.protocol === "tcp" ? "none" : c.protocol || "quic",
           token: d.token || "",
           tcpMux: !!c.tcpMux,
+          tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
+          heartbeatTimeout: c.heartbeatTimeout || 30,
+          tcpKeepalive: c.tcpKeepalive || 30,
+          maxPoolCount: c.maxPoolCount || 65535,
+          quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
+          quicMaxIdleTimeout: c.quicMaxIdleTimeout || 30,
+          quicMaxIncomingStreams: c.quicMaxIncomingStreams || 100000,
+          restart: !!((d.unit || c.unit) && (d.unit || c.unit).active === "active"),
           busy: false,
           error: "",
         };
@@ -1024,15 +1065,22 @@ document.addEventListener("alpine:init", () => {
       if (!e) return;
       e.busy = true;
       e.error = "";
-      const bind = e.bindAddr === "custom" ? e.customBind.trim() : e.bindAddr;
       try {
         const d = await FRP.api(`/api/servers/${encodeURIComponent(e.name)}`, {
           method: "PUT",
           body: {
             bindPort: Number(e.bindPort),
-            bindAddr: bind,
+            bindAddr: e.bindAddr.trim(),
             protocol: e.protocol,
             tcpMux: e.tcpMux,
+            tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 30,
+            tcpKeepalive: Number(e.tcpKeepalive) || 30,
+            maxPoolCount: Number(e.maxPoolCount) || 65535,
+            quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
+            quicMaxIdleTimeout: Number(e.quicMaxIdleTimeout) || 30,
+            quicMaxIncomingStreams: Number(e.quicMaxIncomingStreams) || 100000,
+            restart: !!e.restart,
             ...(e.token.trim() ? { token: e.token.trim() } : {}),
           },
         });
@@ -1056,6 +1104,67 @@ document.addEventListener("alpine:init", () => {
 
     retoken() {
       if (this.edit) this.edit.token = FRP.genToken();
+    },
+
+    /* ---- one-click Foreign installer ---------------------------------- */
+
+    ipOf(cidr) {
+      return String(cidr || "").split("/")[0];
+    },
+
+    openForeign(row) {
+      const linked =
+        this.tunnels.find(
+          (t) =>
+            this.ipOf(t.local_private_ip) === row.bindAddr ||
+            this.ipOf(t.remote_private_ip) === row.bindAddr
+        ) || (this.tunnels.length === 1 ? this.tunnels[0] : null);
+      this.foreign = {
+        row,
+        linked: !!linked,
+        iface: linked ? linked.iface : "gt11",
+        iranPublicIp: linked ? linked.local_public_ip : "",
+        foreignPublicIp: linked ? linked.remote_public_ip : "",
+        ports: "8989",
+        proto: "both",
+        localIp: "127.0.0.1",
+        subnet: "10.100.111.0/30",
+        rawSpeed: false,
+        busy: false,
+        error: "",
+        result: null,
+      };
+      // A linked tunnel already knows the Foreign public IP: generate right away.
+      if (this.foreign.foreignPublicIp) this.genForeign();
+    },
+
+    async genForeign() {
+      const f = this.foreign;
+      if (!f) return;
+      f.busy = true;
+      f.error = "";
+      try {
+        const d = await FRP.api(
+          `/api/servers/${encodeURIComponent(f.row.name)}/foreign-script`,
+          {
+            method: "POST",
+            body: {
+              foreignPublicIp: f.foreignPublicIp.trim(),
+              iranPublicIp: f.iranPublicIp.trim(),
+              iface: f.iface.trim(),
+              subnet: f.subnet.trim(),
+              ports: f.ports.trim(),
+              proto: f.proto,
+              localIp: f.localIp.trim(),
+              rawSpeed: !!f.rawSpeed,
+            },
+          }
+        );
+        f.result = d;
+      } catch (e) {
+        f.error = e.message;
+      }
+      f.busy = false;
     },
 
     async openRaw(name) {
@@ -1365,6 +1474,7 @@ document.addEventListener("alpine:init", () => {
         const hasUDP = proxies.some((p) => p.type === "udp");
         const first = proxies[0] || {};
         const enc = first.useEncryption !== false;
+        const tls = c.tls !== undefined ? !!c.tls : !!row.tls;
         this.edit = {
           name: row.name,
           style,
@@ -1375,11 +1485,19 @@ document.addEventListener("alpine:init", () => {
           ports: ports.join(","),
           proto: hasTCP && hasUDP ? "both" : hasUDP ? "udp" : "tcp",
           localIp: first.localIp || "127.0.0.1",
-          useTls: c.tls !== undefined ? !!c.tls : !!row.tls,
+          useTls: tls,
           useEncryption: enc,
           useCompression: !!first.useCompression,
           tcpMux: c.tcpMux !== undefined ? !!c.tcpMux : !!row.tcpMux,
-          rawSpeed: !(c.tls !== undefined ? c.tls : row.tls) && !enc,
+          tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
+          dialServerTimeout: c.dialServerTimeout || 5,
+          dialServerKeepalive: c.dialServerKeepalive || 30,
+          poolCount: c.poolCount || 30,
+          heartbeatInterval: c.heartbeatInterval || 10,
+          heartbeatTimeout: c.heartbeatTimeout || 30,
+          loginFailExit: !!c.loginFailExit,
+          restart: !!(d.unit && d.unit.active === "active"),
+          rawSpeed: !tls && !enc,
           busy: false,
           error: "",
         };
@@ -1404,6 +1522,14 @@ document.addEventListener("alpine:init", () => {
             useEncryption: e.useEncryption,
             useCompression: e.useCompression,
             tcpMux: e.tcpMux,
+            tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
+            dialServerTimeout: Number(e.dialServerTimeout) || 5,
+            dialServerKeepalive: Number(e.dialServerKeepalive) || 30,
+            poolCount: Number(e.poolCount) || 30,
+            heartbeatInterval: Number(e.heartbeatInterval) || 10,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 30,
+            loginFailExit: !!e.loginFailExit,
+            restart: !!e.restart,
             ports: e.ports.trim(),
             proto: e.proto,
             localIp: e.localIp.trim(),

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -35,11 +36,19 @@ type serverCreateReq struct {
 }
 
 type serverUpdateReq struct {
-	BindPort *int    `json:"bindPort"`
-	BindAddr *string `json:"bindAddr"`
-	Protocol *string `json:"protocol"`
-	TCPMux   *bool   `json:"tcpMux"`
-	Token    *string `json:"token"`
+	BindPort                *int    `json:"bindPort"`
+	BindAddr                *string `json:"bindAddr"`
+	Protocol                *string `json:"protocol"`
+	TCPMux                  *bool   `json:"tcpMux"`
+	TCPMuxKeepaliveInterval *int    `json:"tcpMuxKeepaliveInterval"`
+	HeartbeatTimeout        *int    `json:"heartbeatTimeout"`
+	TCPKeepalive            *int    `json:"tcpKeepalive"`
+	MaxPoolCount            *int    `json:"maxPoolCount"`
+	QUICKeepalivePeriod     *int    `json:"quicKeepalivePeriod"`
+	QUICMaxIdleTimeout      *int    `json:"quicMaxIdleTimeout"`
+	QUICMaxIncomingStreams  *int    `json:"quicMaxIncomingStreams"`
+	Token                   *string `json:"token"`
+	Restart                 *bool   `json:"restart"`
 }
 
 type unitState struct {
@@ -49,18 +58,25 @@ type unitState struct {
 }
 
 type serverSummary struct {
-	Name       string    `json:"name"`
-	File       string    `json:"file"`
-	BindAddr   string    `json:"bindAddr"`
-	BindPort   int       `json:"bindPort"`
-	Protocol   string    `json:"protocol"`
-	WebPort    int       `json:"webPort"`
-	WebUser    string    `json:"webUser,omitempty"`
-	TokenSet   bool      `json:"tokenSet"`
-	TCPMux     bool      `json:"tcpMux"`
-	Style      string    `json:"style"`
-	Unit       unitState `json:"unit"`
-	ParseError string    `json:"parseError,omitempty"`
+	Name                    string    `json:"name"`
+	File                    string    `json:"file"`
+	BindAddr                string    `json:"bindAddr"`
+	BindPort                int       `json:"bindPort"`
+	Protocol                string    `json:"protocol"`
+	WebPort                 int       `json:"webPort"`
+	WebUser                 string    `json:"webUser,omitempty"`
+	TokenSet                bool      `json:"tokenSet"`
+	TCPMux                  bool      `json:"tcpMux"`
+	TCPMuxKeepaliveInterval int       `json:"tcpMuxKeepaliveInterval"`
+	HeartbeatTimeout        int       `json:"heartbeatTimeout"`
+	TCPKeepalive            int       `json:"tcpKeepalive"`
+	MaxPoolCount            int       `json:"maxPoolCount"`
+	QUICKeepalivePeriod     int       `json:"quicKeepalivePeriod"`
+	QUICMaxIdleTimeout      int       `json:"quicMaxIdleTimeout"`
+	QUICMaxIncomingStreams  int       `json:"quicMaxIncomingStreams"`
+	Style                   string    `json:"style"`
+	Unit                    unitState `json:"unit"`
+	ParseError              string    `json:"parseError,omitempty"`
 }
 
 // ---- list / detail ---------------------------------------------------------
@@ -103,6 +119,13 @@ func (s *Server) serverSummary(name string) serverSummary {
 		sum.WebUser = cfg.WebServer.User
 		sum.TokenSet = cfg.Auth.Token != ""
 		sum.TCPMux = cfg.Transport.TCPMux
+		sum.TCPMuxKeepaliveInterval = cfg.Transport.TCPMuxKeepaliveInterval
+		sum.HeartbeatTimeout = cfg.Transport.HeartbeatTimeout
+		sum.TCPKeepalive = cfg.Transport.TCPKeepalive
+		sum.MaxPoolCount = cfg.Transport.MaxPoolCount
+		sum.QUICKeepalivePeriod = cfg.Transport.QUIC.KeepalivePeriod
+		sum.QUICMaxIdleTimeout = cfg.Transport.QUIC.MaxIdleTimeout
+		sum.QUICMaxIncomingStreams = cfg.Transport.QUIC.MaxIncomingStreams
 	}
 	sum.Unit = s.unitState("frps@" + name)
 	return sum
@@ -146,6 +169,15 @@ func protocolFromWire(p string) (frpconf.Protocol, bool) {
 		return frpconf.ProtoNone, true
 	}
 	return "", false
+}
+
+// checkRange guards numeric transport tunables before they reach the TOML
+// renderer (a zero/negative value would make frp reject the config).
+func checkRange(label string, v, lo, hi int) error {
+	if v < lo || v > hi {
+		return fmt.Errorf("%s must be %d..%d", label, lo, hi)
+	}
+	return nil
 }
 
 // ---- create ----------------------------------------------------------------
@@ -298,8 +330,8 @@ func (s *Server) handleServerGet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "file": path, "style": detail.Style,
-		"config": detail.serverSummary,
-		"token":  detail.Token, "webPassword": detail.WebPassword,
+		"config": detail.serverSummary, "unit": detail.Unit,
+		"token": detail.Token, "webPassword": detail.WebPassword,
 	})
 }
 
@@ -389,6 +421,55 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.TCPMux != nil {
 		cfg.Transport.TCPMux = *req.TCPMux
 	}
+	if req.TCPMuxKeepaliveInterval != nil {
+		if err := checkRange("tcpMuxKeepaliveInterval", *req.TCPMuxKeepaliveInterval, 0, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.TCPMuxKeepaliveInterval = *req.TCPMuxKeepaliveInterval
+	}
+	if req.HeartbeatTimeout != nil {
+		if err := checkRange("heartbeatTimeout", *req.HeartbeatTimeout, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.HeartbeatTimeout = *req.HeartbeatTimeout
+	}
+	if req.TCPKeepalive != nil {
+		if err := checkRange("tcpKeepalive", *req.TCPKeepalive, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.TCPKeepalive = *req.TCPKeepalive
+	}
+	if req.MaxPoolCount != nil {
+		if err := checkRange("maxPoolCount", *req.MaxPoolCount, 1, 1000000); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.MaxPoolCount = *req.MaxPoolCount
+	}
+	if req.QUICKeepalivePeriod != nil {
+		if err := checkRange("quic.keepalivePeriod", *req.QUICKeepalivePeriod, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.KeepalivePeriod = *req.QUICKeepalivePeriod
+	}
+	if req.QUICMaxIdleTimeout != nil {
+		if err := checkRange("quic.maxIdleTimeout", *req.QUICMaxIdleTimeout, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.MaxIdleTimeout = *req.QUICMaxIdleTimeout
+	}
+	if req.QUICMaxIncomingStreams != nil {
+		if err := checkRange("quic.maxIncomingStreams", *req.QUICMaxIncomingStreams, 1, 100000000); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.QUIC.MaxIncomingStreams = *req.QUICMaxIncomingStreams
+	}
 	if req.Token != nil {
 		if *req.Token == "" {
 			writeErr(w, http.StatusBadRequest, "token may not be empty")
@@ -407,10 +488,18 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return
 	}
-	s.restartIfActive("frps@" + name)
+	unit := "frps@" + name
+	switch {
+	case req.Restart == nil:
+		s.restartIfActive(unit) // legacy default: apply immediately when running
+	case *req.Restart:
+		if out, rerr := s.runner.Systemctl("restart", unit); rerr != nil {
+			audit("restart %s after edit failed: %s", unit, strings.TrimSpace(out))
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "verify": gate.VerifyMode, "backup": gate.Backup,
-		"unit": s.unitState("frps@" + name),
+		"unit": s.unitState(unit),
 	})
 }
 

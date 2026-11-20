@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.2.3 — full transport editors + one-click Foreign installer
+
+### Editing
+
+- The frps `bindAddr` field is now a free-form input backed by a datalist, so
+  the exact current value (`0.0.0.0`, `::`, a GRE IP, or any custom address)
+  round-trips unchanged. Opening `server-7018` with `bindAddr = "0.0.0.0"` no
+  longer shows or saves `::`.
+- The frps editor exposes every transport tunable: `bindAddr`, `bindPort`,
+  `auth.token` (generate/copy), protocol (QUIC/KCP/none), `tcpMux`,
+  `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`,
+  `maxPoolCount` and the QUIC `keepalivePeriod` / `maxIdleTimeout` /
+  `maxIncomingStreams` block.
+- The frpc editor exposes `serverAddr`, `serverPort`, `protocol`, `tcpMux`,
+  `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`,
+  `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, `loginFailExit`,
+  `tls.enable`, forwarded ports / `proto` / `localIP`, per-proxy encryption and
+  compression, plus the Raw Speed preset.
+- Both editors have **Restart service after save** (checked by default when the
+  unit is active); unchecking writes the file without touching the running unit.
+- Both editors keep a **Raw TOML** shortcut, and unknown keys are still
+  preserved on structured saves.
+
+### Foreign node provisioning
+
+- Every frps row now has a **foreign** action, and the Iran wizard result
+  includes a **1-click Foreign setup** block. It takes the Foreign public IP,
+  forwarded ports (`8989` default) and a Raw Speed toggle.
+- The generated block is entirely self-contained (root SSH only): it installs
+  the GRE helper + systemd units, creates the mirrored tunnel (`ip tunnel add
+  … mode gre … ttl 255`, MTU 1400, `/30` address, `rp_filter=0`, NOTRACK proto
+  47, TCPMSS clamp), downloads `frpc` when missing, writes
+  `/root/frp/client/<name>.toml` with the Iran GRE IP / port / token / exact
+  transport settings, enables both units and verifies with `ping` +
+  `systemctl is-active`.
+- Copy works on plain `http://<ip>:9000` through the textarea +
+  `execCommand('copy')` fallback already used elsewhere in the panel.
+
 ## v1.2.2 — faster, reliable edit + quick-setup workflow
 
 ### Editing

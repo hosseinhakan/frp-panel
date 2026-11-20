@@ -88,6 +88,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/servers/{name}", s.authed(s.handleServerUpdate))
 	mux.HandleFunc("DELETE /api/servers/{name}", s.authed(s.handleServerDelete))
 	mux.HandleFunc("POST /api/servers/{name}/token/regenerate", s.authed(s.handleServerTokenRegenerate))
+	mux.HandleFunc("POST /api/servers/{name}/foreign-script", s.authed(s.handleServerForeignScript))
 	mux.HandleFunc("GET /api/servers/{name}/raw", s.authed(s.handleServerRawGet))
 	mux.HandleFunc("PUT /api/servers/{name}/raw", s.authed(s.handleServerRawPut))
 

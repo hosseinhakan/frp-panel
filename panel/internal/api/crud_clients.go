@@ -36,17 +36,25 @@ type clientCreateReq struct {
 }
 
 type clientUpdateReq struct {
-	ServerAddr     *string `json:"serverAddr"`
-	ServerPort     *int    `json:"serverPort"`
-	Token          *string `json:"token"`
-	Protocol       *string `json:"protocol"`
-	TCPMux         *bool   `json:"tcpMux"`
-	UseTLS         *bool   `json:"useTls"`
-	UseEncryption  *bool   `json:"useEncryption"`
-	UseCompression *bool   `json:"useCompression"`
-	Ports          *string `json:"ports"`
-	Proto          *string `json:"proto"`
-	LocalIP        *string `json:"localIp"`
+	ServerAddr              *string `json:"serverAddr"`
+	ServerPort              *int    `json:"serverPort"`
+	Token                   *string `json:"token"`
+	Protocol                *string `json:"protocol"`
+	TCPMux                  *bool   `json:"tcpMux"`
+	TCPMuxKeepaliveInterval *int    `json:"tcpMuxKeepaliveInterval"`
+	DialServerTimeout       *int    `json:"dialServerTimeout"`
+	DialServerKeepalive     *int    `json:"dialServerKeepalive"`
+	PoolCount               *int    `json:"poolCount"`
+	HeartbeatInterval       *int    `json:"heartbeatInterval"`
+	HeartbeatTimeout        *int    `json:"heartbeatTimeout"`
+	LoginFailExit           *bool   `json:"loginFailExit"`
+	UseTLS                  *bool   `json:"useTls"`
+	UseEncryption           *bool   `json:"useEncryption"`
+	UseCompression          *bool   `json:"useCompression"`
+	Ports                   *string `json:"ports"`
+	Proto                   *string `json:"proto"`
+	LocalIP                 *string `json:"localIp"`
+	Restart                 *bool   `json:"restart"`
 }
 
 type proxyDTO struct {
@@ -60,19 +68,26 @@ type proxyDTO struct {
 }
 
 type clientSummary struct {
-	Name       string     `json:"name"`
-	File       string     `json:"file"`
-	ServerAddr string     `json:"serverAddr"`
-	ServerPort int        `json:"serverPort"`
-	Protocol   string     `json:"protocol"`
-	TLS        bool       `json:"tls"`
-	TCPMux     bool       `json:"tcpMux"`
-	WebPort    int        `json:"webPort"`
-	TokenSet   bool       `json:"tokenSet"`
-	Proxies    []proxyDTO `json:"proxies"`
-	Style      string     `json:"style"`
-	Unit       unitState  `json:"unit"`
-	ParseError string     `json:"parseError,omitempty"`
+	Name                    string     `json:"name"`
+	File                    string     `json:"file"`
+	ServerAddr              string     `json:"serverAddr"`
+	ServerPort              int        `json:"serverPort"`
+	Protocol                string     `json:"protocol"`
+	TLS                     bool       `json:"tls"`
+	TCPMux                  bool       `json:"tcpMux"`
+	TCPMuxKeepaliveInterval int        `json:"tcpMuxKeepaliveInterval"`
+	DialServerTimeout       int        `json:"dialServerTimeout"`
+	DialServerKeepalive     int        `json:"dialServerKeepalive"`
+	PoolCount               int        `json:"poolCount"`
+	HeartbeatInterval       int        `json:"heartbeatInterval"`
+	HeartbeatTimeout        int        `json:"heartbeatTimeout"`
+	LoginFailExit           bool       `json:"loginFailExit"`
+	WebPort                 int        `json:"webPort"`
+	TokenSet                bool       `json:"tokenSet"`
+	Proxies                 []proxyDTO `json:"proxies"`
+	Style                   string     `json:"style"`
+	Unit                    unitState  `json:"unit"`
+	ParseError              string     `json:"parseError,omitempty"`
 }
 
 // ---- list / detail ------------------------------------------------------------
@@ -113,6 +128,13 @@ func (s *Server) clientSummary(name string) clientSummary {
 		sum.Protocol = cfg.Transport.Protocol
 		sum.TLS = cfg.Transport.TLS.Enable
 		sum.TCPMux = cfg.Transport.TCPMux
+		sum.TCPMuxKeepaliveInterval = cfg.Transport.TCPMuxKeepaliveInterval
+		sum.DialServerTimeout = cfg.Transport.DialServerTimeout
+		sum.DialServerKeepalive = cfg.Transport.DialServerKeepalive
+		sum.PoolCount = cfg.Transport.PoolCount
+		sum.HeartbeatInterval = cfg.Transport.HeartbeatInterval
+		sum.HeartbeatTimeout = cfg.Transport.HeartbeatTimeout
+		sum.LoginFailExit = cfg.LoginFailExit
 		sum.WebPort = cfg.WebServer.Port
 		sum.TokenSet = cfg.Auth.Token != ""
 		for _, p := range cfg.Proxies {
@@ -503,6 +525,51 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.TCPMux != nil {
 		cfg.Transport.TCPMux = *req.TCPMux
 	}
+	if req.TCPMuxKeepaliveInterval != nil {
+		if err := checkRange("tcpMuxKeepaliveInterval", *req.TCPMuxKeepaliveInterval, 0, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.TCPMuxKeepaliveInterval = *req.TCPMuxKeepaliveInterval
+	}
+	if req.DialServerTimeout != nil {
+		if err := checkRange("dialServerTimeout", *req.DialServerTimeout, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.DialServerTimeout = *req.DialServerTimeout
+	}
+	if req.DialServerKeepalive != nil {
+		if err := checkRange("dialServerKeepalive", *req.DialServerKeepalive, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.DialServerKeepalive = *req.DialServerKeepalive
+	}
+	if req.PoolCount != nil {
+		if err := checkRange("poolCount", *req.PoolCount, 1, 100000); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.PoolCount = *req.PoolCount
+	}
+	if req.HeartbeatInterval != nil {
+		if err := checkRange("heartbeatInterval", *req.HeartbeatInterval, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.HeartbeatInterval = *req.HeartbeatInterval
+	}
+	if req.HeartbeatTimeout != nil {
+		if err := checkRange("heartbeatTimeout", *req.HeartbeatTimeout, 1, 3600); err != nil {
+			writeErr(w, http.StatusBadRequest, "%v", err)
+			return
+		}
+		cfg.Transport.HeartbeatTimeout = *req.HeartbeatTimeout
+	}
+	if req.LoginFailExit != nil {
+		cfg.LoginFailExit = *req.LoginFailExit
+	}
 	if req.UseTLS != nil {
 		cfg.Transport.TLS.Enable = *req.UseTLS
 	}
@@ -527,10 +594,18 @@ func (s *Server) handleClientUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "%v", err)
 		return
 	}
-	s.restartIfActive("frpc@" + name)
+	unit := "frpc@" + name
+	switch {
+	case req.Restart == nil:
+		s.restartIfActive(unit) // legacy default: apply immediately when running
+	case *req.Restart:
+		if out, rerr := s.runner.Systemctl("restart", unit); rerr != nil {
+			audit("restart %s after edit failed: %s", unit, strings.TrimSpace(out))
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "verify": gate.VerifyMode, "backup": gate.Backup,
-		"proxies": len(cfg.Proxies), "unit": s.unitState("frpc@" + name),
+		"proxies": len(cfg.Proxies), "unit": s.unitState(unit),
 	})
 }
 

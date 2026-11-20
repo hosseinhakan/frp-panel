@@ -286,8 +286,9 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | POST | `/api/auth/login` / `/api/auth/logout` / GET `/api/auth/me` | session lifecycle, first-login flag |
 | GET | `/api/overview` | node summary: uptime, CPU/RAM, BBR/zram state, service + tunnel roll-up |
 | GET/POST | `/api/servers` | list / create frps instance (wizard payload: port, protocol, mux, bindAddr choice) |
-| GET/PUT/DELETE | `/api/servers/{name}` | read / update / remove (config + unit disable) |
+| GET/PUT/DELETE | `/api/servers/{name}` | read / update / remove (config + unit disable); the update body covers every transport tunable and an optional `restart` flag |
 | POST | `/api/servers/{name}/token/regenerate` | new random token (+ optional propagate) |
+| POST | `/api/servers/{name}/foreign-script` | self-contained Foreign installer (GRE helper + units + frpc download + matching TOML) for a linked GRE tunnel or caller-supplied public IPs |
 | GET/POST/PUT/DELETE | `/api/clients…` | mirrored CRUD for frpc; `POST /api/clients/{name}/proxies` adds port rules w/ per-rule TCP/UDP toggle |
 | POST | `/api/services/{unit}/action` `{action: start\|stop\|restart}` | systemctl wrapper (whitelist) |
 | GET/POST | `/api/gre`, DELETE `/api/gre/{name}` | tunnel CRUD (writes `/root/frp/gre/<name>.env`, ensures units) |
@@ -457,8 +458,8 @@ P8 implementation notes:
 |---|---|
 | Login | centered card, one-time password notice, error shake, lockout hint |
 | Dashboard | node role badge (Iran/Foreign/standalone) + uptime; CPU/RAM/net sparklines; GRE + FRP status cards with quick restart; live latency chart (uPlot, per target); recent watchdog events |
-| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/regenerate-token); edit always opens (raw modal for template/unparseable files, merge-preserving form for valid TOML); TOML editor (textarea, verify-on-save); New-Server wizard modal (port, protocol, mux, **bindAddr with auto-detected tunnel IPs**, token autogen + regenerate + copy) |
-| Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list (`8989,8443,2053`) with a single TCP / TCP+UDP selector (edit replaces the list in place); **Raw speed** toggle turns TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
+| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign/toml); edit always opens (raw modal for template/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **foreign** generates the one-click Foreign installer |
+| Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list (`8989,8443,2053`) with a single TCP / TCP+UDP selector (edit replaces the list in place); edit exposes `loginFailExit`, `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`, `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, TLS, per-proxy encryption/compression and restart-after-save; **Raw speed** toggle turns TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
 | GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1400); **mirror-config** generator for the far node; delete with teardown confirmation |
 | Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); swap file card; GC cron status |
 | Logs | unit picker (frps@*/frpc@*/gre-turbo/watchdog), live SSE pane, pause/follow, level filter, colored timestamps |

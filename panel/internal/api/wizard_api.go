@@ -253,6 +253,26 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		"mirror_command": renderMirrorCommand(mp, "8443,2053,443"),
 		"next_step":      "Paste the mirror payload (or run the mirror command) on the Foreign/exit node, add the local ports it should expose, and run the wizard there.",
 	}
+
+	// Ready-to-paste Foreign installer (no frp-panel needed on that host).
+	foreignT := gre.Tunnel{
+		Name:            t.Iface,
+		Iface:           t.Iface,
+		LocalPublicIP:   t.RemotePublicIP, // foreign
+		RemotePublicIP:  t.LocalPublicIP,  // iran
+		LocalPrivateIP:  t.RemotePrivateIP,
+		RemotePrivateIP: t.LocalPrivateIP,
+		MTU:             t.MTU,
+		MSSMode:         t.MSSMode,
+	}
+	clientProto, _ := wizardClientProtocol(protoName)
+	if _, fs, ferr := buildForeignScript(foreignT, serverAddr, port, cfg.Auth.Token, clientProto, foreignScriptOptions{
+		Ports: "8989", Proto: "both", LocalIP: "127.0.0.1", ClientName: "client-" + itoa(port),
+	}); ferr == nil {
+		resp["foreign_script"] = fs
+	} else {
+		resp["foreign_script_error"] = ferr.Error()
+	}
 	if unitErr != "" {
 		resp["unit_error"] = unitErr
 	}

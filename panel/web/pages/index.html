@@ -466,8 +466,53 @@
                           <div class="btn-row mt05">
                             <button class="btn" @click="revCopy(rev.result.mirror_command)">copy command</button>
                           </div>
+
+                          <p class="navgroup-label mt1">1-click Foreign setup — paste on the Foreign server</p>
+                          <p class="faint small">
+                            Self-contained Bash: creates the mirrored GRE tunnel + systemd units, installs
+                            frpc if missing, writes the matching config, then pings the tunnel and checks
+                            the unit. Only root SSH is needed on the Foreign host.
+                          </p>
+                          <div class="field-row mt05">
+                            <div class="field">
+                              <label>Foreign public IP</label>
+                              <input class="input mono" x-model="rev.foreignPublicIp" placeholder="5.6.7.8">
+                            </div>
+                            <div class="field">
+                              <label>Ports (comma separated)</label>
+                              <input class="input mono" x-model="rev.foreignPorts" placeholder="8989,8443">
+                            </div>
+                            <div class="field">
+                              <label>Forward as</label>
+                              <select class="select" x-model="rev.foreignProto">
+                                <option value="both">TCP + UDP</option>
+                                <option value="tcp">TCP only</option>
+                                <option value="udp">UDP only</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div class="row mt05">
+                            <label class="check"><input type="checkbox" x-model="rev.foreignRawSpeed"> Raw speed — TLS &amp; FRP encryption OFF</label>
+                            <div class="grow"></div>
+                            <button type="button" class="btn" :disabled="rev.foreignBusy" @click="revGenForeign()">Generate command</button>
+                          </div>
+                          <template x-if="rev.foreignError">
+                            <div class="notice bad mt05"><span class="mono" x-text="rev.foreignError"></span></div>
+                          </template>
+                          <template x-if="rev.result.foreign_script">
+                            <div>
+                              <pre class="logpane mt05" x-text="rev.result.foreign_script"></pre>
+                              <div class="btn-row mt05">
+                                <button class="btn" @click="revCopy(rev.result.foreign_script)">copy Foreign command</button>
+                              </div>
+                            </div>
+                          </template>
+                          <template x-if="rev.result.foreign_script_error">
+                            <div class="notice warn mt05"><span class="mono" x-text="rev.result.foreign_script_error"></span></div>
+                          </template>
+
                           <p class="faint small mt05">
-                            Next: run this wizard on the Foreign node, choose <strong>Foreign Node</strong>,
+                            Alternative: run this wizard on the Foreign node, choose <strong>Foreign Node</strong>,
                             paste the payload, add the local ports, and run the link test.
                           </p>
                         </div>
@@ -534,6 +579,12 @@
               <button class="btn primary" @click="openCreate()">+ New server</button>
             </div>
 
+            <datalist id="server-bind-choices">
+              <template x-for="c in bindChoices()" :key="c.v">
+                <option :value="c.v" x-text="c.label"></option>
+              </template>
+            </datalist>
+
             <template x-if="loading"><p class="muted">loading…</p></template>
 
             <template x-if="!loading && !rows.length">
@@ -585,6 +636,7 @@
                             <button class="btn tiny" @click="openEdit(r)">edit</button>
                             <button class="btn tiny" @click="regenerate(r)">retoken</button>
                             <button class="btn tiny" @click="openRaw(r.name)">toml</button>
+                            <button class="btn tiny" @click="openForeign(r)">foreign</button>
                             <button class="btn tiny danger" @click="remove(r)">delete</button>
                           </div>
                         </td>
@@ -614,25 +666,15 @@
                       <select class="select" x-model="wiz.protocol">
                         <option value="quic">quic (recommended)</option>
                         <option value="kcp">kcp</option>
-                        <option value="none">none — plain TCP</option>
+                        <option value="none">tcp — plain TCP (no QUIC/KCP)</option>
                       </select>
                     </div>
                   </div>
                   <div class="field mt1">
                     <label>Bind address</label>
-                    <select class="select mono" x-model="wiz.bindAddr">
-                      <template x-for="c in bindChoices()" :key="c.v">
-                        <option :value="c.v" x-text="c.label"></option>
-                      </template>
-                    </select>
-                    <span class="hint">Iran entry node: bind frps to the GRE IP (e.g. 10.100.111.2) so the control port is reachable only over gt11.</span>
+                    <input class="input mono" x-model="wiz.bindAddr" list="server-bind-choices" placeholder="::">
+                    <span class="hint">Pick a suggestion or type any IPv4/IPv6 address. Iran entry node: use the GRE IP (e.g. 10.100.111.2) so the control port is reachable only over gt11.</span>
                   </div>
-                  <template x-if="wiz.bindAddr === 'custom'">
-                    <div class="field mt05">
-                      <label>Custom bind address</label>
-                      <input class="input mono" x-model="wiz.customBind" placeholder="10.100.111.2">
-                    </div>
-                  </template>
                   <div class="field-row mt1">
                     <div class="field">
                       <label>Auth token (32 chars, crypto-random)</label>
@@ -669,6 +711,11 @@
                   </div>
                   <div class="field-row">
                     <div class="field">
+                      <label>Bind address</label>
+                      <input class="input mono" x-model="edit.bindAddr" list="server-bind-choices" placeholder="::">
+                      <span class="hint">Saved exactly as typed — 0.0.0.0, ::, a GRE IP, or any custom address.</span>
+                    </div>
+                    <div class="field">
                       <label>Bind port</label>
                       <input class="input mono" type="number" min="1" max="65535" x-model="edit.bindPort">
                     </div>
@@ -677,25 +724,10 @@
                       <select class="select" x-model="edit.protocol">
                         <option value="quic">quic</option>
                         <option value="kcp">kcp</option>
-                        <option value="none">none — plain TCP</option>
+                        <option value="none">tcp — plain TCP (no QUIC/KCP)</option>
                       </select>
                     </div>
                   </div>
-                  <div class="field mt05">
-                    <label>Bind address</label>
-                    <select class="select mono" x-model="edit.bindAddr">
-                      <template x-for="c in bindChoices()" :key="c.v">
-                        <option :value="c.v" x-text="c.label"></option>
-                      </template>
-                    </select>
-                    <span class="hint">Iran entry node: the GRE IP (10.100.111.2) keeps frps off the public internet.</span>
-                  </div>
-                  <template x-if="edit.bindAddr === 'custom'">
-                    <div class="field mt05">
-                      <label>Custom bind address</label>
-                      <input class="input mono" x-model="edit.customBind">
-                    </div>
-                  </template>
                   <div class="field mt05">
                     <label>Auth token</label>
                     <div class="tokfield">
@@ -704,11 +736,58 @@
                       <button type="button" class="btn" @click="copyTok(edit.token)">copy</button>
                     </div>
                   </div>
+                  <div class="field-row mt1">
+                    <div class="field">
+                      <label>tcpMuxKeepaliveInterval</label>
+                      <input class="input mono" type="number" min="0" max="3600" x-model.number="edit.tcpMuxKeepaliveInterval">
+                      <span class="hint">seconds · suite default 10</span>
+                    </div>
+                    <div class="field">
+                      <label>heartbeatTimeout</label>
+                      <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
+                      <span class="hint">seconds · 30 fast / 90 relaxed</span>
+                    </div>
+                  </div>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.tcpMux"> enable tcpMux</label>
                   </div>
+                  <details class="mt1">
+                    <summary class="muted small">Advanced transport</summary>
+                    <div class="field-row mt05">
+                      <div class="field">
+                        <label>tcpKeepalive</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.tcpKeepalive">
+                        <span class="hint">seconds · 30 fast / 120 relaxed</span>
+                      </div>
+                      <div class="field">
+                        <label>maxPoolCount</label>
+                        <input class="input mono" type="number" min="1" max="1000000" x-model.number="edit.maxPoolCount">
+                        <span class="hint">suite default 65535</span>
+                      </div>
+                    </div>
+                    <div class="field-row mt05">
+                      <div class="field">
+                        <label>quic.keepalivePeriod</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.quicKeepalivePeriod">
+                      </div>
+                      <div class="field">
+                        <label>quic.maxIdleTimeout</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.quicMaxIdleTimeout">
+                      </div>
+                      <div class="field">
+                        <label>quic.maxIncomingStreams</label>
+                        <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
+                      </div>
+                    </div>
+                    <p class="faint small mt05">QUIC values are written when the protocol is <span class="mono">quic</span>; otherwise they stay as commented defaults.</p>
+                  </details>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="edit.restart"> Restart service after save</label>
+                    <span class="faint small">uncheck to write the file without touching the running unit</span>
+                  </div>
                   <template x-if="edit.error"><div class="notice bad mt05"><span x-text="edit.error"></span></div></template>
                   <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="openRaw(edit.name); edit = null">Raw TOML</button>
                     <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
                   </div>
@@ -730,6 +809,86 @@
                   <div class="modal-foot">
                     <button class="btn ghost" @click="raw = null">Close</button>
                     <button class="btn primary" :disabled="raw.busy" @click="saveRaw()">Save (verify + .bak)</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- one-click Foreign installer -->
+            <template x-if="foreign">
+              <div class="modal-back" @keydown.escape.window="foreign = null">
+                <div class="modal">
+                  <div class="modal-head">
+                    <h2 x-text="'Foreign setup — from frps@' + foreign.row.name"></h2>
+                    <span class="pill" :class="foreign.linked ? 'ok' : 'warn'"
+                          x-text="foreign.linked ? 'GRE tunnel linked' : 'no linked GRE tunnel'"></span>
+                  </div>
+                  <p class="muted small">
+                    Generates one self-contained Bash block for the Foreign server. It installs the GRE
+                    tunnel + frpc, writes the matching config and verifies the link — only root SSH is
+                    needed there (no frp-panel, no frp-manager).
+                  </p>
+                  <div class="field-row mt1">
+                    <div class="field">
+                      <label>Foreign public IP</label>
+                      <input class="input mono" x-model="foreign.foreignPublicIp" placeholder="5.6.7.8">
+                    </div>
+                    <div class="field">
+                      <label>Iran public IP</label>
+                      <input class="input mono" x-model="foreign.iranPublicIp" placeholder="1.2.3.4">
+                    </div>
+                    <div class="field">
+                      <label>GRE interface</label>
+                      <input class="input mono" x-model="foreign.iface" placeholder="gt11">
+                    </div>
+                  </div>
+                  <div class="field-row mt05">
+                    <div class="field">
+                      <label>Ports (comma separated)</label>
+                      <input class="input mono" x-model="foreign.ports" placeholder="8989,8443">
+                    </div>
+                    <div class="field">
+                      <label>Forward as</label>
+                      <select class="select" x-model="foreign.proto">
+                        <option value="both">TCP + UDP</option>
+                        <option value="tcp">TCP only</option>
+                        <option value="udp">UDP only</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label>Local IP on Foreign</label>
+                      <input class="input mono" x-model="foreign.localIp" placeholder="127.0.0.1">
+                    </div>
+                    <div class="field">
+                      <label>GRE subnet (when unlinked)</label>
+                      <input class="input mono" x-model="foreign.subnet" placeholder="10.100.111.0/30">
+                    </div>
+                  </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="foreign.rawSpeed"> Raw speed — TLS &amp; FRP encryption OFF</label>
+                    <div class="grow"></div>
+                    <button type="button" class="btn primary" :disabled="foreign.busy" @click="genForeign()">Generate command</button>
+                  </div>
+                  <template x-if="foreign.error">
+                    <div class="notice bad mt05"><span class="mono" x-text="foreign.error"></span></div>
+                  </template>
+                  <template x-if="foreign.result">
+                    <div>
+                      <div class="row mt1">
+                        <span class="pill ok mono" x-text="'frpc@' + foreign.result.clientName + ' → ' + foreign.result.serverAddr + ':' + foreign.result.serverPort"></span>
+                        <span class="pill idle mono" x-text="foreign.result.iface + ' · ' + foreign.result.foreignPrivateIp + ' ↔ ' + foreign.result.iranPrivateIp"></span>
+                        <span class="pill" :class="foreign.result.rawSpeed ? 'warn' : 'ok'"
+                              x-text="foreign.result.rawSpeed ? 'raw speed' : 'tls + encryption'"></span>
+                      </div>
+                      <p class="navgroup-label mt1">paste on the Foreign server as root</p>
+                      <pre class="logpane" x-text="foreign.result.script"></pre>
+                      <div class="btn-row mt05">
+                        <button type="button" class="btn" @click="copyTok(foreign.result.script)">copy command</button>
+                      </div>
+                    </div>
+                  </template>
+                  <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="foreign = null">Close</button>
                   </div>
                 </div>
               </div>
@@ -962,6 +1121,7 @@
                   </div>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="wiz.useTls" :disabled="wiz.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.useEncryption" :disabled="wiz.rawSpeed"> per-proxy encryption</label>
                     <label class="check"><input type="checkbox" x-model="wiz.useCompression" :disabled="wiz.rawSpeed"> compression</label>
                     <label class="check"><input type="checkbox" x-model="wiz.tcpMux" :disabled="wiz.rawSpeed"> tcpMux</label>
                     <label class="check"><input type="checkbox" x-model="wiz.webEnabled"> metrics webServer (7400+)</label>
@@ -1026,17 +1186,58 @@
                       <input class="input mono" x-model="edit.localIp" placeholder="127.0.0.1">
                     </div>
                   </div>
+                  <details class="mt1">
+                    <summary class="muted small">Advanced transport</summary>
+                    <div class="field-row mt05">
+                      <div class="field">
+                        <label>tcpMuxKeepaliveInterval</label>
+                        <input class="input mono" type="number" min="0" max="3600" x-model.number="edit.tcpMuxKeepaliveInterval">
+                      </div>
+                      <div class="field">
+                        <label>dialServerTimeout</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.dialServerTimeout">
+                      </div>
+                      <div class="field">
+                        <label>dialServerKeepalive</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.dialServerKeepalive">
+                      </div>
+                    </div>
+                    <div class="field-row mt05">
+                      <div class="field">
+                        <label>poolCount</label>
+                        <input class="input mono" type="number" min="1" max="100000" x-model.number="edit.poolCount">
+                      </div>
+                      <div class="field">
+                        <label>heartbeatInterval</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatInterval">
+                      </div>
+                      <div class="field">
+                        <label>heartbeatTimeout</label>
+                        <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
+                      </div>
+                    </div>
+                    <p class="faint small mt05">Fast anti-stall defaults: keepalive 10s / heartbeat 10s / timeout 30s / pool 30.</p>
+                  </details>
+                  <div class="row mt05">
+                    <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>
+                  </div>
                   <div class="row mt1">
                     <label class="check"><input type="checkbox" x-model="edit.rawSpeed" @change="applyRawSpeed('edit')"> raw speed — TLS &amp; FRP encryption OFF</label>
                   </div>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.useTls" :disabled="edit.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="edit.useEncryption" :disabled="edit.rawSpeed"> per-proxy encryption</label>
                     <label class="check"><input type="checkbox" x-model="edit.useCompression" :disabled="edit.rawSpeed"> compression</label>
                     <label class="check"><input type="checkbox" x-model="edit.tcpMux" :disabled="edit.rawSpeed"> tcpMux</label>
+                  </div>
+                  <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="edit.restart"> Restart service after save</label>
+                    <span class="faint small">uncheck to write the file without touching the running unit</span>
                   </div>
                   <p class="faint small mt05">Saving replaces the forwarded-port list; other TOML keys are preserved.</p>
                   <template x-if="edit.error"><div class="notice bad mt05"><span x-text="edit.error"></span></div></template>
                   <div class="modal-foot">
+                    <button type="button" class="btn ghost" @click="openRaw(edit.name); edit = null">Raw TOML</button>
                     <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
                   </div>

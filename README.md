@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.2 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.3 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
@@ -81,12 +81,16 @@ IP**, at the same forwarded port.
    the switch in the result banner, so one Iran server can drive several
    Foreign nodes.
 
-   Copy the generated **mirror payload** (or the equivalent CLI command).
-2. **Foreign (exit)** — run the same wizard on the Foreign node, choose
-   **Foreign Node**, paste the payload, and enter a comma-separated local port
-   list (`8989,8443,2053`) plus the TCP / TCP+UDP selector. It creates the
-   mirrored GRE tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without
-   touching the mirrored `/30`) and an `frpc` instance. Normal mode uses
+   Copy the generated **mirror payload** (or the equivalent CLI command), or
+   skip the wizard on the Foreign host entirely and use the **1-click Foreign
+   setup** block in the result (also available as the **foreign** action on
+   every server row). It only needs root SSH on the Foreign server.
+2. **Foreign (exit)** — either paste the generated one-click Bash block, or run
+   the same wizard on the Foreign node, choose **Foreign Node**, paste the
+   payload, and enter a comma-separated local port list (`8989,8443,2053`) plus
+   the TCP / TCP+UDP selector. Either path creates the mirrored GRE tunnel
+   (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without touching the
+   mirrored `/30`) and an `frpc` instance. Normal mode uses
    `tls.enable = true` + per-proxy `useEncryption = true`; **Raw speed** sets
    TLS/encryption/compression/tcpMux off for already-encrypted traffic
    (VLESS/VMess/Hysteria). It then pings the Iran tunnel IP and reports the

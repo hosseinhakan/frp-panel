@@ -93,6 +93,22 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	if cmd, _ := resp["mirror_command"].(string); !strings.Contains(cmd, "frp-manager reverse foreign") {
 		t.Errorf("mirror command = %q", cmd)
 	}
+	foreignScript, _ := resp["foreign_script"].(string)
+	for _, want := range []string{
+		"FRP_FOREIGN_SETUP",
+		"FOREIGN_PUBLIC_IP='5.6.7.8'",
+		"IRAN_PUBLIC_IP='1.2.3.4'",
+		"FOREIGN_PRIVATE_IP='10.100.111.1/30'",
+		"IRAN_PRIVATE_IP='10.100.111.2/30'",
+		"SERVER_ADDR='10.100.111.2'",
+		`auth.token = "` + token + `"`,
+		"ip tunnel add",
+		"systemctl is-active",
+	} {
+		if !strings.Contains(foreignScript, want) {
+			t.Errorf("foreign installer missing %q:\n%s", want, foreignScript)
+		}
+	}
 
 	if !e.runner.called("systemctl:enable --now gre-tunnel@gt11") {
 		t.Error("gre-tunnel@gt11 not enabled")

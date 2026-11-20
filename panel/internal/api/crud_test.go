@@ -553,6 +553,138 @@ func TestClientProxiesAddReplaceDelete(t *testing.T) {
 	}
 }
 
+func TestServerEditExposesAllTransportFields(t *testing.T) {
+	e := newTestEnv(t)
+	if rec := e.authorized(http.MethodPost, "/api/servers",
+		`{"bindPort":7018,"bindAddr":"0.0.0.0","protocol":"quic","token":"ServerToken1234567890"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Detail must return the exact bind address (0.0.0.0 must never become ::)
+	// and every transport field the edit modal exposes.
+	rec := e.authorized(http.MethodGet, "/api/servers/server-7018", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d: %s", rec.Code, rec.Body.String())
+	}
+	cfg, _ := jsonMap(t, rec)["config"].(map[string]any)
+	if cfg == nil {
+		t.Fatalf("no config in detail: %s", rec.Body.String())
+	}
+	if cfg["bindAddr"] != "0.0.0.0" {
+		t.Errorf("bindAddr = %v, want 0.0.0.0", cfg["bindAddr"])
+	}
+	for field, want := range map[string]float64{
+		"tcpMuxKeepaliveInterval": 10,
+		"heartbeatTimeout":        30,
+		"tcpKeepalive":            30,
+		"maxPoolCount":            65535,
+		"quicKeepalivePeriod":     10,
+		"quicMaxIdleTimeout":      30,
+		"quicMaxIncomingStreams":  100000,
+	} {
+		if cfg[field] != want {
+			t.Errorf("%s = %v, want %v", field, cfg[field], want)
+		}
+	}
+
+	e.runner.active["frps@server-7018"] = "active"
+	e.runner.resetCalls()
+	rec = e.authorized(http.MethodPut, "/api/servers/server-7018", `{
+		"bindAddr":"10.100.111.2","bindPort":7019,"protocol":"quic",
+		"tcpMux":true,"tcpMuxKeepaliveInterval":15,
+		"heartbeatTimeout":90,"tcpKeepalive":120,"maxPoolCount":2048,
+		"quicKeepalivePeriod":12,"quicMaxIdleTimeout":45,"quicMaxIncomingStreams":5000,
+		"restart":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ := os.ReadFile(filepath.Join(e.srv.paths.ServerDir, "server-7018.toml"))
+	for _, want := range []string{
+		`bindAddr = "10.100.111.2"`,
+		"bindPort = 7019",
+		"quicBindPort = 7019",
+		"transport.tcpMux = true",
+		"transport.tcpMuxKeepaliveInterval = 15",
+		"transport.heartbeatTimeout = 90",
+		"transport.tcpKeepalive = 120",
+		"transport.maxPoolCount = 2048",
+		"transport.quic.keepalivePeriod = 12",
+		"transport.quic.maxIdleTimeout = 45",
+		"transport.quic.maxIncomingStreams = 5000",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("updated config missing %q:\n%s", want, raw)
+		}
+	}
+	if !e.runner.called("systemctl:restart frps@server-7018") {
+		t.Error("restart-after-save was requested but systemctl restart was not called")
+	}
+
+	// restart:false writes the file without touching the running unit.
+	e.runner.resetCalls()
+	rec = e.authorized(http.MethodPut, "/api/servers/server-7018", `{"heartbeatTimeout":60,"restart":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update without restart = %d: %s", rec.Code, rec.Body.String())
+	}
+	if e.runner.called("systemctl:restart frps@server-7018") {
+		t.Error("restart:false still restarted frps")
+	}
+}
+
+func TestClientEditExposesAllTransportFields(t *testing.T) {
+	e := newTestEnv(t)
+	if rec := e.authorized(http.MethodPost, "/api/servers", `{"bindPort":7000}`); rec.Code != http.StatusCreated {
+		t.Fatalf("server create = %d", rec.Code)
+	}
+	if rec := e.authorized(http.MethodPost, "/api/clients",
+		`{"serverAddr":"10.100.111.2","serverPort":7000,"ports":"8989","proto":"tcp"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("client create = %d: %s", rec.Code, rec.Body.String())
+	}
+	e.runner.active["frpc@client-7000"] = "active"
+	e.runner.resetCalls()
+
+	rec := e.authorized(http.MethodPut, "/api/clients/client-7000", `{
+		"serverAddr":"10.100.111.2","serverPort":7000,"protocol":"tcp",
+		"tcpMux":false,"tcpMuxKeepaliveInterval":15,
+		"dialServerTimeout":7,"dialServerKeepalive":45,"poolCount":50,
+		"heartbeatInterval":12,"heartbeatTimeout":40,"loginFailExit":true,
+		"useTls":false,"useEncryption":false,"useCompression":false,
+		"ports":"8989,8443","proto":"both","localIp":"127.0.0.1","restart":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7000.toml"))
+	cfg, err := frpconf.ParseClient(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LoginFailExit != true {
+		t.Error("loginFailExit not saved")
+	}
+	if cfg.Transport.TCPMuxKeepaliveInterval != 15 ||
+		cfg.Transport.DialServerTimeout != 7 ||
+		cfg.Transport.DialServerKeepalive != 45 ||
+		cfg.Transport.PoolCount != 50 ||
+		cfg.Transport.HeartbeatInterval != 12 ||
+		cfg.Transport.HeartbeatTimeout != 40 {
+		t.Errorf("transport fields not saved: %+v", cfg.Transport)
+	}
+	if cfg.Transport.TLS.Enable {
+		t.Error("TLS should be off after raw-speed edit")
+	}
+	if len(cfg.Proxies) != 4 { // 2 ports × tcp+udp
+		t.Fatalf("proxies = %d, want 4", len(cfg.Proxies))
+	}
+	for _, p := range cfg.Proxies {
+		if p.Transport.UseEncryption || p.Transport.UseCompression {
+			t.Errorf("proxy %s kept encryption/compression", p.Name)
+		}
+	}
+	if !e.runner.called("systemctl:restart frpc@client-7000") {
+		t.Error("restart-after-save was requested but systemctl restart was not called")
+	}
+}
+
 func TestServicesListAndAction(t *testing.T) {
 	e := newTestEnv(t)
 	if rec := e.authorized(http.MethodPost, "/api/servers", `{"bindPort":7000}`); rec.Code != http.StatusCreated {

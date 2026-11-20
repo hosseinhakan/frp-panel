@@ -3,7 +3,7 @@
 #
 # Typical use (root on a fresh Ubuntu/Debian VPS):
 #
-#   curl -fsSL https://raw.githubusercontent.com/garshasprahimi/frp-panel/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/hosseinhakan/frp-panel/main/scripts/install.sh | bash
 #
 # Flags:
 #   --port N        panel listen port            (default: panel.toml 9000)
@@ -19,7 +19,7 @@
 # print the access URLs and the one-time password hint.
 set -euo pipefail
 
-REPO="${FRP_PANEL_RELEASE_REPO:-https://github.com/garshasprahimi/frp-panel}"
+REPO="${FRP_PANEL_RELEASE_REPO:-https://github.com/hosseinhakan/frp-panel}"
 BASE="${FRP_PANEL_RELEASE_BASE:-}"
 VERSION="latest"
 PORT=""
@@ -39,7 +39,7 @@ install.sh — one-line curl installer for the FRP Tunnel Suite web panel.
 
 Typical use (root on a fresh Ubuntu/Debian VPS):
 
-  curl -fsSL https://raw.githubusercontent.com/garshasprahimi/frp-panel/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/hosseinhakan/frp-panel/main/scripts/install.sh | bash
 
 Flags:
   --port N        panel listen port    (default: panel.toml 9000)

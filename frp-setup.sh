@@ -46,7 +46,7 @@ PANEL_DEFAULT_PORT=9000
 # this file (the old default pulled a stale upstream copy — now local-copy).
 FRP_SETUP_SOURCE_URL="${FRP_SETUP_SOURCE_URL:-}"
 # Release location serving frp-panel_linux_<arch>.tar.gz (set by CI).
-PANEL_RELEASE_BASE="${FRP_PANEL_RELEASE_BASE:-https://github.com/frp-suite/frp-panel/releases/latest/download}"
+PANEL_RELEASE_BASE="${FRP_PANEL_RELEASE_BASE:-https://github.com/hosseinhakan/frp-panel/releases/latest/download}"
 
 # --- print helpers (unchanged from v1) ---------------------------------------
 print_header() {

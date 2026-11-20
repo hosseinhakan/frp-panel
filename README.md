@@ -8,6 +8,9 @@ systemd units, so CLI and Web UI never drift.
 
 > Architecture & roadmap: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 > · release history: [CHANGELOG.md](CHANGELOG.md)
+>
+> **راهنمای فارسی (Persian guide): [docs/FA.md](docs/FA.md)** — تانل چیست، چطور
+> راه بیندازیم، و عیب‌یابی.
 
 ## Quickstart
 
@@ -15,7 +18,7 @@ Install the web panel on a fresh Ubuntu 22.04/24.04 or Debian 12 VPS
 (root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/garshasprahimi/frp-panel/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hosseinhakan/frp-panel/main/scripts/install.sh | bash
 ```
 
 The installer detects the architecture, downloads the release tarball,

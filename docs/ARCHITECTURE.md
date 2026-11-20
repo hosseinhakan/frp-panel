@@ -293,7 +293,10 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | GET | `/api/logs/units`, GET `/api/logs/stream?unit=…&since=…` | SSE journal tail (frps@*/frpc@*/gre/turbo/watchdog/panel units only) |
 | GET | `/api/stats?instance=…` | scraped frp webServer metrics + rolling history (conns, in/out bytes per proxy) |
 | GET | `/api/backup/export`, POST `/api/backup/import` | ZIP stream down / multipart restore (selective categories) |
-| GET/POST | `/api/watchdog` | state, config, recent heal events |
+| GET | `/api/wizard/gre-frp/defaults` | next free GRE iface, `10.100.<n>.0/30` subnet and frps control port (scans envs, live links, configs, `/proc/net/tcp`) |
+| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict |
+| GET | `/api/watchdog`, POST `/api/watchdog` | state, config (Telegram token masked), recent heal events |
+| POST | `/api/watchdog/test-telegram` | send one test alert using stored or posted credentials |
 | GET | `/api/health`, `/api/version` | unauthenticated liveness + build info |
 
 P3/P4 implementation notes (additions to the table above):
@@ -377,12 +380,15 @@ P7 implementation notes:
   for `REDACTED` lines, then the handler runs `daemon-reload` and restarts
   affected **active** units (`?restart=1`); restoring panel.toml/unit is
   reported with a restart hint instead of self-restarting.
-- Watchdog: `GET /api/watchdog` (unit state, parsed env, last 50 heal
-  events from `/var/log/frp-panel/watchdog.log`); `POST` with pointer
-  fields merges over the current env (explicit zeros/invalids → 400),
-  writes `watchdog.env` **byte-identical** to the CLI heredoc (`.bak`
+- Watchdog: `GET /api/watchdog` (unit state, parsed env with the Telegram bot
+  token masked, last 50 heal events from `/var/log/frp-panel/watchdog.log`);
+  `POST` with pointer fields merges over the current env (explicit zeros/invalids
+  → 400), writes `watchdog.env` **byte-identical** to the CLI heredoc (`.bak`
   first), installs the embedded helper + unit and enables/restarts
-  `frp-watchdog`.
+  `frp-watchdog`. An empty/masked `tgBotToken` keeps the stored secret;
+  `clearTelegram` wipes all Telegram fields. `POST /api/watchdog/test-telegram`
+  sends one message via the stored or posted token/chat/API base. Secret-free
+  backup exports redact `TG_BOT_TOKEN`, and import clears the placeholder.
 
 Validation before any config write: `frps verify -c <file>` / `frpc verify -c <file>`
 (FRP's own subcommand — renders templates too). Bad TOML never reaches systemd.
@@ -576,9 +582,13 @@ persisted via `frp-zram.service` (oneshot, RemainAfterExit). `zram-off` + option
   **layer 2** (when GRE is healthy) probes the frpc control TCP channel and, if the
   loopback `webServer` exists, requires every proxy in `/api/status` to report `running`
   (3 strikes → restart only that `frpc@*`, cooldown). Structured HEAL events → journal +
-  `/var/log/frp-panel/watchdog.log` + surfaced in the UI. Config lives in
+  `/var/log/frp-panel/watchdog.log` + surfaced in the UI. When `TG_BOT_TOKEN` and
+  `TG_CHAT_ID` are set, each heal also posts a plain-text Telegram alert
+  (host/layer/unit/reason/consecutive/result) from a background `curl --max-time 5`,
+  so an unreachable or blocked Telegram API never stalls the loop; `TG_API_BASE`
+  can point at a Worker reverse proxy. Config lives in
   `/etc/frp-panel/watchdog.env` (`INTERVAL`, `THRESHOLD`, `COOLDOWN`, `PING_TIMEOUT`,
-  `TCP_TIMEOUT`).
+  `TCP_TIMEOUT`, `TG_BOT_TOKEN`, `TG_CHAT_ID`, `TG_API_BASE`).
 
 ---
 

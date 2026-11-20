@@ -568,6 +568,9 @@ ensure_watchdog_assets() {
 #
 # Config: /etc/frp-panel/watchdog.env
 #   INTERVAL=15  THRESHOLD=3  COOLDOWN=60  PING_TIMEOUT=2  TCP_TIMEOUT=3
+#   TG_BOT_TOKEN=  TG_CHAT_ID=  TG_API_BASE=https://api.telegram.org
+# Telegram alerts are optional; both TG_BOT_TOKEN and TG_CHAT_ID must be set.
+# TG_API_BASE can point at a Cloudflare Worker reverse proxy on blocked hosts.
 # Canonical copy: panel/internal/assets/helpers/frp-watchdog (also embedded in frp-panel).
 set -uo pipefail   # deliberately NOT set -e: probe failures must not kill the loop
 
@@ -578,6 +581,7 @@ LOG_DIR="/var/log/frp-panel"
 STATE_DIR="/var/lib/frp-panel/watchdog"
 
 INTERVAL=15; THRESHOLD=3; COOLDOWN=60; PING_TIMEOUT=2; TCP_TIMEOUT=3
+TG_BOT_TOKEN=""; TG_CHAT_ID=""; TG_API_BASE="https://api.telegram.org"
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && source "$CONF"
 
@@ -591,6 +595,33 @@ log() {
     line="$(date -Is) frp-watchdog: $*"
     echo "$line" >> "$LOG_DIR/watchdog.log" 2>/dev/null || true
     echo "$line"
+}
+
+tg_notify() { # tg_notify <layer> <unit> <reason> <consecutive> <result>
+    [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || return 0
+    local layer="$1" unit="$2" reason="$3" consec="$4" result="$5"
+    case "$layer" in
+        gre|GRE) layer="GRE" ;;
+        frp|FRP) layer="FRP" ;;
+    esac
+    # Best-effort and strictly off the critical path: the watchdog loop never
+    # waits for Telegram, even when the API is slow, blocked or unreachable.
+    (
+        local base="${TG_API_BASE:-https://api.telegram.org}"
+        base="${base%/}"
+        local host text
+        host="$(hostname 2>/dev/null || echo unknown-host)"
+        text="$(printf 'FRP Tunnel Suite heal event\nHost: %s\nLayer: %s\nUnit: %s\nReason: %s\nConsecutive failures: %s\nResult: %s' \
+            "$host" "$layer" "$unit" "$reason" "$consec" "$result")"
+        if ! curl -fsS --max-time 5 \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            --data-urlencode "disable_web_page_preview=true" \
+            "${base}/bot${TG_BOT_TOKEN}/sendMessage" >/dev/null 2>&1; then
+            printf '%s frp-watchdog: TELEGRAM delivery failed layer=%s unit=%s\n' \
+                "$(date -Is)" "$layer" "$unit" >> "$LOG_DIR/watchdog.log" 2>/dev/null || true
+        fi
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 fail_bump() { # fail_bump <key> ok|fail — echoes current consecutive-failure count
@@ -622,10 +653,12 @@ heal() { # heal <unit> <key> <reason> [layer] [consecutive] — 0 when restarted
     date +%s > "$STATE_DIR/$key.last"
     if systemctl restart "$unit" 2>/dev/null; then
         log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=ok"
+        tg_notify "$layer" "$unit" "$reason" "$consec" "ok"
         echo 0 > "$STATE_DIR/$key.fails"
         return 0
     fi
     log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=failed"
+    tg_notify "$layer" "$unit" "$reason" "$consec" "fail"
     return 1
 }
 
@@ -698,8 +731,10 @@ restart_active_frpc() { # restart_active_frpc <reason>
     for unit in $(active_frpc_units); do
         if systemctl restart "$unit" 2>/dev/null; then
             log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=ok"
+            tg_notify "GRE" "$unit" "$1" "after GRE rebuild" "ok"
         else
             log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=failed"
+            tg_notify "GRE" "$unit" "$1" "after GRE rebuild" "fail"
         fi
     done
 }
@@ -773,7 +808,7 @@ check_frpc() {
     done
 }
 
-log "watchdog started (interval=${INTERVAL}s threshold=${THRESHOLD} cooldown=${COOLDOWN}s)"
+log "watchdog started (interval=${INTERVAL}s threshold=${THRESHOLD} cooldown=${COOLDOWN}s telegram=$([[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] && echo on || echo off))"
 while true; do
     check_gre
     check_frpc
@@ -2044,7 +2079,7 @@ EOF
 # --- FRP over GRE Reverse quick-setup ------------------------------------------
 
 reverse_print_flow() {
-    echo "User ──► Iran Public IP:<port> ──► frps (Iran, 10.100.111.2) ──► GRE gt11 ──► frpc (Foreign, 10.100.111.1) ──► Foreign 127.0.0.1:<port>"
+    echo "User ──► Iran Public IP:<port> ──► frps (Iran) ──► GRE gtNN ──► frpc (Foreign) ──► Foreign 127.0.0.1:<port>"
 }
 
 reverse_payload_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN
@@ -2122,6 +2157,142 @@ reverse_parse_payload() { # file-or-stdin; sets RP_* globals
     return 0
 }
 
+# --- multi-tunnel allocation (GRE iface / /30 / control port) -----------------
+
+reverse_iface_busy() { # reverse_iface_busy <iface>
+    local want="$1" f
+    [[ -n "$want" ]] || return 0
+    if ip link show "$want" >/dev/null 2>&1; then return 0; fi
+    [[ -f "$GRE_DIR/$want.env" ]] && return 0
+    for f in "$GRE_DIR"/*.env; do
+        [[ -e "$f" ]] || continue
+        grep -qE "^IFACE=${want}$" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+reverse_iface_own() { # reverse_iface_own <iface> <local_pub> <remote_pub>
+    local f="$GRE_DIR/$1.env" lp="$2" rp="$3" l r
+    [[ -r "$f" && -n "$lp" && -n "$rp" ]] || return 1
+    l=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)
+    r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
+    [[ "$l" == "$lp" && "$r" == "$rp" ]]
+}
+
+reverse_find_own_iface() { # reverse_find_own_iface <local_pub> <remote_pub> -> iface
+    local lp="$1" rp="$2" f base l r
+    [[ -n "$lp" && -n "$rp" ]] || return 1
+    for f in "$GRE_DIR"/*.env; do
+        [[ -e "$f" ]] || continue
+        l=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)
+        r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
+        if [[ "$l" == "$lp" && "$r" == "$rp" ]] || [[ "$l" == "$rp" && "$r" == "$lp" ]]; then
+            base="$(basename "$f" .env)"
+            echo "$base"
+            return 0
+        fi
+    done
+    return 1
+}
+
+reverse_octet_busy() { # reverse_octet_busy <third-octet>
+    local octet="$1" f
+    [[ -n "$octet" ]] || return 0
+    for f in "$GRE_DIR"/*.env; do
+        [[ -e "$f" ]] || continue
+        grep -qE "^[A-Z_]+_PRIVATE_IP=10\.100\.${octet}\." "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+reverse_next_iface() {
+    local n=11
+    while (( n < 1000 )) && reverse_iface_busy "gt$n"; do
+        n=$((n + 1))
+    done
+    echo "gt$n"
+}
+
+reverse_next_octet() {
+    local n=111 first=111
+    while reverse_octet_busy "$n"; do
+        n=$((n + 1))
+        if (( n > 254 )); then n=1; fi
+        if (( n == first )); then break; fi
+    done
+    echo "$n"
+}
+
+reverse_alloc_gre() { # req_iface req_octet [own_local_pub own_remote_pub] -> "iface octet warning"
+    local req_iface="$1" req_octet="$2" own_lp="${3:-}" own_rp="${4:-}"
+    local iface octet msg="" own_iface=0 own_oct=0
+    if [[ -n "$own_lp" ]] && reverse_iface_own "$req_iface" "$own_lp" "$own_rp"; then
+        own_iface=1
+        if [[ "$(sed -n 's/^LOCAL_PRIVATE_IP=10\.100\.\([0-9][0-9]*\)\..*/\1/p' "$GRE_DIR/$req_iface.env" | head -n1)" == "$req_octet" ]]; then
+            own_oct=1
+        fi
+    fi
+    if [[ $own_iface -eq 0 ]] && reverse_iface_busy "$req_iface"; then
+        msg="$req_iface was busy"; iface=""
+    else
+        iface="$req_iface"
+    fi
+    if [[ $own_oct -eq 0 ]] && reverse_octet_busy "$req_octet"; then
+        [[ -n "$msg" ]] || msg="10.100.$req_octet.0/30 was in use"
+        octet=""
+    else
+        octet="$req_octet"
+    fi
+    [[ -z "$iface" ]] && iface="$(reverse_next_iface)"
+    [[ -z "$octet" ]] && octet="$(reverse_next_octet)"
+    [[ -n "$msg" ]] && msg="$msg; allocated $iface (10.100.$octet.0/30)"
+    printf '%s %s %s\n' "$iface" "$octet" "$msg"
+}
+
+reverse_own_port() { # reverse_own_port <octet> -> existing port for 10.100.<octet>.2
+    local octet="$1" f bp
+    for f in "$SERVER_DIR"/*.toml; do
+        [[ -e "$f" ]] || continue
+        grep -qE "^bindAddr *= *\"?10\.100\.${octet}\.2\"?$" "$f" 2>/dev/null || continue
+        bp=$(sed -n 's/^bindPort *= *\([0-9][0-9]*\)$/\1/p' "$f" | head -n1)
+        if [[ -n "$bp" ]]; then
+            echo "$bp"
+            return 0
+        fi
+    done
+    return 1
+}
+
+reverse_alloc_port() { # requested_port -> "port warning"
+    local req="$1" p
+    [[ "$req" =~ ^[0-9]+$ ]] || req=7025
+    p="$req"
+    while reverse_port_busy "$p"; do
+        p=$((p + 1))
+        if (( p > 65535 )); then p=7025; fi
+        if (( p == req )); then break; fi
+    done
+    if (( p != req )); then
+        printf '%s %s\n' "$p" "port $req was in use; switched to $p"
+    else
+        printf '%s %s\n' "$p" ""
+    fi
+}
+
+reverse_port_busy() { # reverse_port_busy <port>
+    local p="$1" f
+    [[ "$p" =~ ^[0-9]+$ ]] || return 0
+    for f in "$SERVER_DIR"/*.toml; do
+        [[ -e "$f" ]] || continue
+        grep -qE "^bindPort *= *${p}$" "$f" 2>/dev/null && return 0
+        [[ "$(basename "$f" .toml)" == "server-$p" ]] && return 0
+    done
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn "sport = :$p" 2>/dev/null | grep -q LISTEN && return 0
+    fi
+    return 1
+}
+
 # reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS]
 reverse_iran_do() {
     local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}"
@@ -2131,6 +2302,7 @@ reverse_iran_do() {
     fi
     if ! is_ipv4 "$iran"; then print_error "Invalid Iran public IP: $iran"; return 1; fi
     if ! is_ipv4 "$foreign"; then print_error "Invalid Foreign public IP: $foreign"; return 1; fi
+    if ! [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then print_error "Invalid interface name: $iface"; return 1; fi
     if ! is_valid_port "$port"; then print_error "Invalid control port: $port"; return 1; fi
     case "$proto" in
         tcp|quic|kcp) ;;
@@ -2141,10 +2313,29 @@ reverse_iran_do() {
         *) print_error "Invalid MSS mode: $mss"; return 1 ;;
     esac
 
-    print_info "Creating GRE gt11: Iran $iran ($iface 10.100.111.2/30) ↔ Foreign $foreign (10.100.111.1/30)"
-    gre_create_do "$iran" "$foreign" "$iface" "10.100.111.2/30" "10.100.111.1/30" 1400 "$mss" || return 1
+    local req_octet=111 own_octet="" alloc_warn req_port own_port own_iface
+    if own_iface="$(reverse_find_own_iface "$iran" "$foreign")"; then
+        iface="$own_iface"
+    fi
+    if reverse_iface_own "$iface" "$iran" "$foreign"; then
+        own_octet="$(sed -n 's/^LOCAL_PRIVATE_IP=10\.100\.\([0-9][0-9]*\)\..*/\1/p' "$GRE_DIR/$iface.env" | head -n1)"
+        [[ -n "$own_octet" ]] && req_octet="$own_octet"
+    fi
+    read -r iface req_octet alloc_warn <<< "$(reverse_alloc_gre "$iface" "$req_octet" "$iran" "$foreign")"
+    [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
+    req_port="$port"
+    if [[ -n "$own_octet" ]] && own_port="$(reverse_own_port "$req_octet")"; then
+        port="$own_port"
+    else
+        read -r port alloc_warn <<< "$(reverse_alloc_port "$req_port")"
+        [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
+    fi
 
-    local token cfg tmp
+    print_info "Creating GRE $iface: Iran $iran (10.100.$req_octet.2/30) ↔ Foreign $foreign (10.100.$req_octet.1/30)"
+    gre_create_do "$iran" "$foreign" "$iface" "10.100.$req_octet.2/30" "10.100.$req_octet.1/30" 1400 "$mss" || return 1
+
+    local token cfg tmp server_addr
+    server_addr="10.100.$req_octet.2"
     token=$(gen_token)
     cfg="$SERVER_DIR/server-$port.toml"
     tmp="$cfg.new"
@@ -2156,7 +2347,7 @@ reverse_iran_do() {
     {
         echo "# Generated by frp-suite (frp-manager CLI / frp-panel Web UI)"
         echo "# FRP over GRE Reverse — Iran entry node (frps bound strictly to $iface)"
-        echo "bindAddr = \"10.100.111.2\""
+        echo "bindAddr = \"$server_addr\""
         echo "bindPort = $port"
         if [[ "$proto" == "quic" ]]; then
             echo "quicBindPort = $port"
@@ -2191,7 +2382,7 @@ reverse_iran_do() {
     fi
     mv "$tmp" "$cfg"
 
-    print_info "Starting frps@server-$port (bindAddr 10.100.111.2:$port)..."
+    print_info "Starting frps@server-$port (bindAddr $server_addr:$port)..."
     systemctl enable --now "frps@server-$port" || print_warning "frps@server-$port failed to start."
     sleep 1
 
@@ -2201,14 +2392,14 @@ reverse_iran_do() {
     fi
 
     echo
-    print_success "Iran entry node ready: frps listening only on 10.100.111.2:$port (invisible on the public internet)."
+    print_success "Iran entry node ready: frps listening only on $server_addr:$port (invisible on the public internet)."
     reverse_print_flow
     echo
     print_info "Mirror payload — paste this on the Foreign node:"
-    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.111.1/30" "10.100.111.2/30" 1400 "$mss" "10.100.111.2" "$port" "$proto" "$token"
+    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1400 "$mss" "$server_addr" "$port" "$proto" "$token"
     echo
     print_info "Or run this on the Foreign node (add the ports it should expose):"
-    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.111.1/30" "10.100.111.2/30" 1400 "$mss" "10.100.111.2" "$port" "$proto" "$token"
+    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1400 "$mss" "$server_addr" "$port" "$proto" "$token"
     echo
     print_warning "Token (the Foreign frpc must use the same): $token"
 }
@@ -2225,6 +2416,7 @@ reverse_foreign_do() {
     if ! is_ipv4 "$lp"; then print_error "Invalid Foreign public IP: $lp"; return 1; fi
     if ! is_ipv4 "$rp"; then print_error "Invalid Iran public IP: $rp"; return 1; fi
     if ! is_ipv4 "$server_addr"; then print_error "Invalid serverAddr: $server_addr"; return 1; fi
+    if ! [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then print_error "Invalid interface name: $iface"; return 1; fi
     if ! is_valid_port "$port"; then print_error "Invalid control port: $port"; return 1; fi
     if ! [[ "$token" =~ ^[A-Za-z0-9_.-]{8,128}$ ]]; then print_error "Invalid token (8..128 chars of [A-Za-z0-9_.-])."; return 1; fi
     if ! is_ipv4 "$localip"; then print_error "Invalid local IP: $localip"; return 1; fi
@@ -2238,10 +2430,20 @@ reverse_foreign_do() {
     esac
     if ! expand_port_input "$ports"; then return 1; fi
 
-    print_info "Creating GRE gt11: Foreign $lp ($iface 10.100.111.1/30) ↔ Iran $rp (10.100.111.2/30)"
-    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" || return 1
+    local cfg tmp p web_port web_pass alloc_warn own_iface
+    if own_iface="$(reverse_find_own_iface "$lp" "$rp")"; then
+        iface="$own_iface"
+    fi
+    if reverse_iface_busy "$iface" && ! reverse_iface_own "$iface" "$lp" "$rp"; then
+        local new_iface
+        new_iface="$(reverse_next_iface)"
+        alloc_warn="$iface was busy locally; using $new_iface with the same mirrored /30"
+        iface="$new_iface"
+    fi
+    [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
 
-    local cfg tmp p web_port web_pass
+    print_info "Creating GRE $iface: Foreign $lp ($lpriv) ↔ Iran $rp ($rpriv)"
+    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" || return 1
     cfg="$CLIENT_DIR/client-$port.toml"
     tmp="$cfg.new"
     web_port="$(allocate_web_port 7400 7499 "$CLIENT_DIR" 2>/dev/null || true)"
@@ -2330,7 +2532,7 @@ reverse_foreign_do() {
     echo
     print_info "Quick link test:"
     local peer avg
-    peer="10.100.111.2"
+    peer="${rpriv%%/*}"
     if ping -c3 -W2 -I "$iface" "$peer" >/dev/null 2>&1; then
         avg=$(ping -c3 -W2 -I "$iface" "$peer" 2>/dev/null | awk -F'/' '/=/{print $5; exit}')
         print_success "GRE peer $peer reachable via $iface (avg ${avg:-?} ms)."
@@ -2346,15 +2548,17 @@ reverse_foreign_do() {
 }
 
 reverse_iran_prompt() {
-    local def_pub iran foreign iface port proto_choice proto mss
+    local def_pub iran foreign iface port proto_choice proto mss def_iface def_port
+    def_iface="$(reverse_next_iface)"
+    def_port="$(reverse_alloc_port 7025 | awk '{print $1}')"
     def_pub=$(detect_public_ip)
     read -p "Iran public IP${def_pub:+ [$def_pub]}: " iran
     iran=${iran:-$def_pub}
     read -p "Foreign public IP: " foreign
-    read -p "GRE interface [gt11]: " iface
-    iface=${iface:-gt11}
-    read -p "Tunnel control port [7025]: " port
-    port=${port:-7025}
+    read -p "GRE interface [$def_iface]: " iface
+    iface=${iface:-$def_iface}
+    read -p "Tunnel control port [$def_port]: " port
+    port=${port:-$def_port}
     echo "FRP protocol:"
     echo "  1) tcp  (plain — recommended over GRE)"
     echo "  2) quic"
@@ -2385,7 +2589,7 @@ reverse_foreign_prompt() {
         read -p "Foreign public IP${def_pub:+ [$def_pub]}: " lp
         lp=${lp:-$def_pub}
         read -p "Iran public IP: " rp
-        iface="gt11"; lpriv="10.100.111.1/30"; rpriv="10.100.111.2/30"
+        iface="$(reverse_next_iface)"; lpriv="10.100.111.1/30"; rpriv="10.100.111.2/30"
         mtu="1400"; mss="1220"; server_addr="10.100.111.2"
         read -p "Tunnel control port [7025]: " port
         port=${port:-7025}
@@ -2413,8 +2617,9 @@ reverse_menu() {
         echo
         reverse_print_flow
         echo
-        echo "Iran is the entry bridge (frps on 10.100.111.2); Foreign is the exit"
-        echo "backend (frpc on 10.100.111.1). Configure Iran first, then Foreign."
+        echo "Iran is the entry bridge (frps bound to a tunnel IP); Foreign is the"
+        echo "exit backend (frpc dialing it over GRE). Configure Iran first, then Foreign."
+        echo "Busy gtNN interfaces, /30 subnets and control ports are allocated automatically."
         echo
         echo "1) Iran node — entry / frps"
         echo "2) Foreign node — exit / frpc"
@@ -2829,11 +3034,13 @@ watchdog_menu() {
         echo "2) Disable watchdog"
         echo "3) Watchdog status"
         echo "4) Tail heal events"
-        echo "5) Run health check now"
-        echo "6) Back to Main Menu"
+        echo "5) Configure Telegram alerts"
+        echo "6) Send a Telegram test alert"
+        echo "7) Run health check now"
+        echo "8) Back to Main Menu"
         echo
 
-        read -p "Choose an option [1-6]: " wd_choice
+        read -p "Choose an option [1-8]: " wd_choice
         echo
 
         case $wd_choice in
@@ -2841,15 +3048,32 @@ watchdog_menu() {
             2) watchdog_disable; pause ;;
             3) watchdog_status; pause ;;
             4) tail -n 30 "$PANEL_LOG_DIR/watchdog.log" 2>/dev/null || print_warning "No watchdog log yet."; pause ;;
-            5) health_check; pause ;;
-            6) return ;;
+            5) watchdog_telegram_setup; pause ;;
+            6) watchdog_telegram_test; pause ;;
+            7) health_check; pause ;;
+            8) return ;;
             *) print_error "Invalid option."; pause ;;
         esac
     done
 }
 
-watchdog_enable() { # interval threshold cooldown
+watchdog_enable() { # [interval] [threshold] [cooldown] [tg_token] [tg_chat] [tg_api_base]
     local interval="${1:-15}" threshold="${2:-3}" cooldown="${3:-60}"
+    local tg_token="${4-__KEEP__}" tg_chat="${5-__KEEP__}" tg_api_base="${6-__KEEP__}"
+    local old_token="" old_chat="" old_api="https://api.telegram.org"
+
+    # Preserve an existing Telegram setup when the caller only retunes timings.
+    if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
+        # shellcheck disable=SC1090
+        source "$PANEL_CONF_DIR/watchdog.env"
+        old_token="${TG_BOT_TOKEN:-}"
+        old_chat="${TG_CHAT_ID:-}"
+        old_api="${TG_API_BASE:-https://api.telegram.org}"
+    fi
+    [[ "$tg_token" == "__KEEP__" ]] && tg_token="$old_token"
+    [[ "$tg_chat" == "__KEEP__" ]] && tg_chat="$old_chat"
+    [[ "$tg_api_base" == "__KEEP__" ]] && tg_api_base="$old_api"
+
     if [[ "${NONINT:-}" != "1" ]]; then
         read -p "Probe interval in seconds [15]: " interval
         interval=${interval:-15}
@@ -2867,6 +3091,20 @@ watchdog_enable() { # interval threshold cooldown
     if ! [[ "$cooldown" =~ ^[0-9]+$ ]]; then
         print_error "Cooldown must be numeric."; return 1
     fi
+    if ! [[ "$tg_token" =~ ^[A-Za-z0-9:_-]*$ ]]; then
+        print_error "Invalid Telegram bot token (allowed: A-Z a-z 0-9 : _ -)."; return 1
+    fi
+    if ! [[ "$tg_chat" =~ ^[-@A-Za-z0-9_]*$ ]]; then
+        print_error "Invalid Telegram chat ID (allowed: A-Z a-z 0-9 _ - @)."; return 1
+    fi
+    tg_api_base="${tg_api_base:-https://api.telegram.org}"
+    tg_api_base="${tg_api_base%/}"
+    if ! [[ "$tg_api_base" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
+        print_error "Invalid Telegram API base (want http(s)://host[/path])."; return 1
+    fi
+    if [[ -n "$tg_token" && -z "$tg_chat" ]] || [[ -z "$tg_token" && -n "$tg_chat" ]]; then
+        print_warning "Telegram needs both a bot token and a chat ID — alerts stay disabled."
+    fi
 
     ensure_watchdog_assets
     mkdir -p "$PANEL_CONF_DIR"
@@ -2877,10 +3115,69 @@ THRESHOLD=$threshold
 COOLDOWN=$cooldown
 PING_TIMEOUT=2
 TCP_TIMEOUT=3
+TG_BOT_TOKEN=$tg_token
+TG_CHAT_ID=$tg_chat
+TG_API_BASE=$tg_api_base
 EOF
+    chmod 600 "$PANEL_CONF_DIR/watchdog.env"
     systemctl enable --now frp-watchdog
     systemctl restart frp-watchdog 2>/dev/null || true
-    print_success "Watchdog enabled (interval=${interval}s threshold=$threshold cooldown=${cooldown}s)."
+    if [[ -n "$tg_token" && -n "$tg_chat" ]]; then
+        print_success "Watchdog enabled (interval=${interval}s threshold=$threshold cooldown=${cooldown}s, Telegram on)."
+    else
+        print_success "Watchdog enabled (interval=${interval}s threshold=$threshold cooldown=${cooldown}s)."
+    fi
+}
+
+watchdog_telegram_setup() {
+    local interval="15" threshold="3" cooldown="60"
+    local old_token="" old_chat="" old_api="https://api.telegram.org"
+    if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
+        # shellcheck disable=SC1090
+        source "$PANEL_CONF_DIR/watchdog.env"
+        interval="${INTERVAL:-15}"; threshold="${THRESHOLD:-3}"; cooldown="${COOLDOWN:-60}"
+        old_token="${TG_BOT_TOKEN:-}"; old_chat="${TG_CHAT_ID:-}"
+        old_api="${TG_API_BASE:-https://api.telegram.org}"
+    fi
+    print_info "Telegram alerts (leave the token blank to keep the current one)"
+    local token chat base
+    read -r -p "Bot token${old_token:+ [keep current]}: " token
+    read -r -p "Chat ID${old_chat:+ [$old_chat]}: " chat
+    chat=${chat:-$old_chat}
+    read -r -p "API base [$old_api]: " base
+    base=${base:-$old_api}
+    if [[ -z "$token" ]]; then
+        token="__KEEP__"
+    fi
+    watchdog_enable "$interval" "$threshold" "$cooldown" "$token" "$chat" "$base"
+}
+
+watchdog_telegram_test() {
+    local token="" chat="" base="https://api.telegram.org"
+    if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
+        # shellcheck disable=SC1090
+        source "$PANEL_CONF_DIR/watchdog.env"
+        token="${TG_BOT_TOKEN:-}"; chat="${TG_CHAT_ID:-}"
+        base="${TG_API_BASE:-https://api.telegram.org}"
+    fi
+    if [[ -z "$token" || -z "$chat" ]]; then
+        print_error "Telegram is not configured (set a bot token and chat ID first)."
+        return 1
+    fi
+    base="${base%/}"
+    local host text
+    host="$(hostname 2>/dev/null || echo this-server)"
+    text="$(printf 'FRP Tunnel Suite test alert\nHost: %s\nStatus: Telegram connectivity OK — watchdog alerts are wired up.' "$host")"
+    if curl -fsS --max-time 8 \
+        --data-urlencode "chat_id=${chat}" \
+        --data-urlencode "text=${text}" \
+        --data-urlencode "disable_web_page_preview=true" \
+        "${base}/bot${token}/sendMessage" >/dev/null 2>&1; then
+        print_success "Telegram test alert sent to chat $chat."
+    else
+        print_error "Telegram delivery failed (check the token, chat ID and API base)."
+        return 1
+    fi
 }
 
 watchdog_disable() {
@@ -2893,6 +3190,16 @@ watchdog_status() {
         print_success "frp-watchdog.service: active"
         if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
             grep -E '^(INTERVAL|THRESHOLD|COOLDOWN|PING_TIMEOUT|TCP_TIMEOUT)' "$PANEL_CONF_DIR/watchdog.env" | sed 's/^/  /'
+            local tg_token="" tg_chat="" tg_api=""
+            # shellcheck disable=SC1090
+            source "$PANEL_CONF_DIR/watchdog.env"
+            tg_token="${TG_BOT_TOKEN:-}"; tg_chat="${TG_CHAT_ID:-}"
+            tg_api="${TG_API_BASE:-https://api.telegram.org}"
+            if [[ -n "$tg_token" && -n "$tg_chat" ]]; then
+                print_info "Telegram alerts: enabled (chat $tg_chat, api $tg_api, token ••••$(printf '%s' "$tg_token" | tail -c 5))"
+            else
+                print_info "Telegram alerts: disabled"
+            fi
         fi
     else
         print_warning "frp-watchdog.service: inactive"
@@ -3084,6 +3391,7 @@ Subcommands (non-interactive):
   frp-manager reverse iran --iran-public IP --foreign-public IP
                            [--iface gt11] [--control-port 7025]
                            [--protocol tcp|quic|kcp] [--mss 1220] [--no-watchdog]
+                           (busy iface/subnet/port auto-allocate the next free value)
   frp-manager reverse foreign --payload FILE|- --ports 8443,2053,443
                            [--proto both|tcp|udp] [--local-ip 127.0.0.1] [--no-watchdog]
   frp-manager reverse foreign --local-public IP --remote-public IP
@@ -3099,6 +3407,10 @@ Subcommands (non-interactive):
   frp-manager backup export [path]
   frp-manager backup import <path>
   frp-manager watchdog enable [--interval 15] [--threshold 3] [--cooldown 60]
+                               [--tg-token TOKEN] [--tg-chat CHAT_ID]
+                               [--tg-api-base URL] [--clear-telegram]
+  frp-manager watchdog telegram [--token TOKEN] [--chat CHAT_ID] [--api-base URL]
+  frp-manager watchdog test-telegram
   frp-manager watchdog disable|status
   frp-manager health
   frp-manager status
@@ -3270,20 +3582,44 @@ watchdog_cli() {
     case "$action" in
         enable)
             local interval="15" threshold="3" cooldown="60"
+            local tg_token="__KEEP__" tg_chat="__KEEP__" tg_api="__KEEP__"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --interval) interval="$2"; shift 2 ;;
                     --threshold) threshold="$2"; shift 2 ;;
                     --cooldown) cooldown="$2"; shift 2 ;;
+                    --tg-token) tg_token="$2"; shift 2 ;;
+                    --tg-chat) tg_chat="$2"; shift 2 ;;
+                    --tg-api-base) tg_api="$2"; shift 2 ;;
+                    --clear-telegram) tg_token=""; tg_chat=""; tg_api="https://api.telegram.org"; shift ;;
                     *) print_error "unknown flag: $1"; exit 1 ;;
                 esac
             done
-            watchdog_enable "$interval" "$threshold" "$cooldown"
+            watchdog_enable "$interval" "$threshold" "$cooldown" "$tg_token" "$tg_chat" "$tg_api"
             ;;
+        telegram)
+            local token="__KEEP__" chat="__KEEP__" base="__KEEP__"
+            local interval="15" threshold="3" cooldown="60"
+            if [[ -r "$PANEL_CONF_DIR/watchdog.env" ]]; then
+                # shellcheck disable=SC1090
+                source "$PANEL_CONF_DIR/watchdog.env"
+                interval="${INTERVAL:-15}"; threshold="${THRESHOLD:-3}"; cooldown="${COOLDOWN:-60}"
+            fi
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --token) token="$2"; shift 2 ;;
+                    --chat) chat="$2"; shift 2 ;;
+                    --api-base) base="$2"; shift 2 ;;
+                    *) print_error "unknown flag: $1"; exit 1 ;;
+                esac
+            done
+            watchdog_enable "$interval" "$threshold" "$cooldown" "$token" "$chat" "$base"
+            ;;
+        test-telegram) watchdog_telegram_test ;;
         disable) watchdog_disable ;;
         status) watchdog_status ;;
         *)
-            print_error "usage: frp-manager watchdog enable|disable|status"
+            print_error "usage: frp-manager watchdog enable|telegram|test-telegram|disable|status"
             exit 1
             ;;
     esac

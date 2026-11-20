@@ -762,6 +762,7 @@ document.addEventListener("alpine:init", () => {
         iranPublicIp: "",
         foreignPublicIp: "",
         iface: foreign ? "" : "gt11",
+        subnet: foreign ? "" : "10.100.111.0/30",
         controlPort: foreign ? "" : 7025,
         protocol: foreign ? "" : "tcp",
         mirrorPayload: "",
@@ -779,12 +780,28 @@ document.addEventListener("alpine:init", () => {
 
     openRevWizard() {
       this.rev = this.blankRev("");
+      this.loadRevDefaults();
+    },
+
+    // Pre-fill the Iran form with the next free iface/subnet/port so a host
+    // that already runs tunnels does not start with a guaranteed conflict.
+    async loadRevDefaults() {
+      try {
+        const d = await FRP.api("/api/wizard/gre-frp/defaults");
+        if (!this.rev || this.rev.role !== "iran") return;
+        if (d.iface) this.rev.iface = d.iface;
+        if (d.subnet) this.rev.subnet = d.subnet;
+        if (d.controlPort) this.rev.controlPort = d.controlPort;
+      } catch {
+        /* non-fatal: the server still auto-allocates on submit */
+      }
     },
 
     revPickRole(role) {
       const keepWatchdog = this.rev ? this.rev.enableWatchdog : true;
       this.rev = this.blankRev(role);
       this.rev.enableWatchdog = keepWatchdog;
+      if (role === "iran") this.loadRevDefaults();
     },
 
     async revRun() {
@@ -799,6 +816,7 @@ document.addEventListener("alpine:init", () => {
           iranPublicIp: r.iranPublicIp.trim(),
           foreignPublicIp: r.foreignPublicIp.trim(),
           iface: r.iface.trim(),
+          subnet: r.subnet.trim(),
           controlPort: Number(r.controlPort) || 0,
           protocol: r.protocol,
           enableWatchdog: !!r.enableWatchdog,
@@ -1835,6 +1853,7 @@ document.addEventListener("alpine:init", () => {
     state: null,
     form: null,
     busy: false,
+    tgBusy: false,
 
     async init() {
       await this.load();
@@ -1852,6 +1871,13 @@ document.addEventListener("alpine:init", () => {
           cooldown: c ? c.cooldown : 60,
           pingTimeout: c ? c.ping_timeout : 2,
           tcpTimeout: c ? c.tcp_timeout : 3,
+          // Never pre-fill the secret: the GET value is already masked and
+          // the input stays blank ("keep current") unless the user types.
+          tgBotToken: "",
+          tgTokenMasked: c && c.tg_bot_token ? c.tg_bot_token : "",
+          tgChatId: c ? c.tg_chat_id : "",
+          tgApiBase: c && c.tg_api_base ? c.tg_api_base : "https://api.telegram.org",
+          clearTelegram: false,
         };
       } catch (e) {
         this.$store.ui.push("cannot read watchdog state: " + e.message, "bad");
@@ -1860,6 +1886,10 @@ document.addEventListener("alpine:init", () => {
 
     get events() {
       return this.state && this.state.events ? this.state.events : [];
+    },
+
+    get telegramEnabled() {
+      return !!(this.state && this.state.telegram_enabled);
     },
 
     async save() {
@@ -1872,6 +1902,10 @@ document.addEventListener("alpine:init", () => {
           const v = parseInt(f[k], 10);
           if (!isNaN(v)) body[k] = v;
         });
+        body.tgChatId = (f.tgChatId || "").trim();
+        body.tgApiBase = (f.tgApiBase || "").trim();
+        if (f.tgBotToken && f.tgBotToken.trim()) body.tgBotToken = f.tgBotToken.trim();
+        if (f.clearTelegram) body.clearTelegram = true;
         const d = await FRP.api("/api/watchdog", { method: "POST", body });
         this.$store.ui.push(
           `watchdog ${d.status}` + (d.unit_error ? " — unit error: " + d.unit_error : ""),
@@ -1882,6 +1916,23 @@ document.addEventListener("alpine:init", () => {
         this.$store.ui.push("save: " + e.message, "bad");
       }
       this.busy = false;
+    },
+
+    async testTelegram() {
+      const f = this.form;
+      if (!f) return;
+      this.tgBusy = true;
+      try {
+        const body = {};
+        if (f.tgBotToken && f.tgBotToken.trim()) body.tgBotToken = f.tgBotToken.trim();
+        if ((f.tgChatId || "").trim()) body.tgChatId = f.tgChatId.trim();
+        if ((f.tgApiBase || "").trim()) body.tgApiBase = f.tgApiBase.trim();
+        const d = await FRP.api("/api/watchdog/test-telegram", { method: "POST", body });
+        this.$store.ui.push("Telegram test alert sent to " + (d.chat_id || "chat"), "ok");
+      } catch (e) {
+        this.$store.ui.push("telegram test: " + e.message, "bad");
+      }
+      this.tgBusy = false;
     },
   }));
 

@@ -5,24 +5,28 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/frp-suite/panel/internal/watchdog"
 )
 
-// handleWatchdogGet reports unit state, the tuning env (if configured) and
+// handleWatchdogGet reports unit state, the tuning env (token masked) and
 // the tail of the watchdog event log.
 func (s *Server) handleWatchdogGet(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"unit": s.unitState("frp-watchdog"),
 	}
 	if env, ok := watchdog.Read(s.watchdogEnvPath()); ok {
-		resp["config"] = env
+		resp["config"] = env.Redacted()
+		resp["telegram_enabled"] = env.TelegramEnabled()
 	} else {
 		resp["config"] = nil
+		resp["telegram_enabled"] = false
 	}
 	resp["events"] = s.tailWatchdogLog(50)
 	writeJSON(w, http.StatusOK, resp)
@@ -56,6 +60,41 @@ type watchdogReq struct {
 	Cooldown    *int  `json:"cooldown"`    // default 60
 	PingTimeout *int  `json:"pingTimeout"` // default 2
 	TCPTimeout  *int  `json:"tcpTimeout"`  // default 3
+
+	// Telegram alerts (all optional). An empty or masked bot token keeps the
+	// current one; ClearTelegram wipes all three fields explicitly.
+	TGBotToken    *string `json:"tgBotToken"`
+	TGChatID      *string `json:"tgChatId"`
+	TGAPIBase     *string `json:"tgApiBase"`
+	ClearTelegram *bool   `json:"clearTelegram"`
+}
+
+// isMaskedToken reports whether the UI echoed back the GET placeholder.
+func isMaskedToken(v string) bool {
+	return strings.Contains(v, "••••")
+}
+
+// mergeTelegram applies the optional alert fields over the existing env.
+func mergeTelegram(env *watchdog.Env, req *watchdogReq) {
+	if req.ClearTelegram != nil && *req.ClearTelegram {
+		env.TGBotToken, env.TGChatID, env.TGAPIBase = "", "", watchdog.DefaultAPIBase
+		return
+	}
+	if req.TGBotToken != nil {
+		if v := strings.TrimSpace(*req.TGBotToken); v != "" && !isMaskedToken(v) {
+			env.TGBotToken = v
+		}
+	}
+	if req.TGChatID != nil {
+		env.TGChatID = strings.TrimSpace(*req.TGChatID)
+	}
+	if req.TGAPIBase != nil {
+		if v := strings.TrimSpace(*req.TGAPIBase); v != "" {
+			env.TGAPIBase = v
+		} else {
+			env.TGAPIBase = watchdog.DefaultAPIBase
+		}
+	}
 }
 
 // handleWatchdogPost configures + enables or disables the watchdog.
@@ -103,6 +142,7 @@ func (s *Server) handleWatchdogPost(w http.ResponseWriter, r *http.Request) {
 	if req.TCPTimeout != nil {
 		env.TCPTimeout = *req.TCPTimeout
 	}
+	mergeTelegram(&env, &req)
 	if err := env.Validate(); err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
@@ -139,14 +179,71 @@ func (s *Server) handleWatchdogPost(w http.ResponseWriter, r *http.Request) {
 	// running so new tuning takes effect immediately.
 	s.restartIfActive("frp-watchdog")
 
-	audit("watchdog enabled (interval=%ds threshold=%d cooldown=%ds)", env.Interval, env.Threshold, env.Cooldown)
+	audit("watchdog enabled (interval=%ds threshold=%d cooldown=%ds telegram=%t)",
+		env.Interval, env.Threshold, env.Cooldown, env.TelegramEnabled())
 	resp := map[string]any{
-		"status": "enabled", "config": env, "unit": s.unitState("frp-watchdog"), "backup": backup,
+		"status": "enabled", "config": env.Redacted(), "unit": s.unitState("frp-watchdog"),
+		"backup": backup, "telegram_enabled": env.TelegramEnabled(),
 	}
 	if unitErr != "" {
 		resp["unit_error"] = unitErr
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type telegramTestReq struct {
+	TGBotToken *string `json:"tgBotToken"`
+	TGChatID   *string `json:"tgChatId"`
+	TGAPIBase  *string `json:"tgApiBase"`
+}
+
+// handleWatchdogTestTelegram sends one message using either the posted
+// credentials or the stored env, so operators can verify reachability
+// (including a Cloudflare Worker API base) before enabling alerts.
+func (s *Server) handleWatchdogTestTelegram(w http.ResponseWriter, r *http.Request) {
+	var req telegramTestReq
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	env, ok := watchdog.Read(s.watchdogEnvPath())
+	if !ok {
+		env = watchdog.Default()
+	}
+	if req.TGBotToken != nil {
+		if v := strings.TrimSpace(*req.TGBotToken); v != "" && !isMaskedToken(v) {
+			env.TGBotToken = v
+		}
+	}
+	if req.TGChatID != nil {
+		env.TGChatID = strings.TrimSpace(*req.TGChatID)
+	}
+	if req.TGAPIBase != nil && strings.TrimSpace(*req.TGAPIBase) != "" {
+		env.TGAPIBase = strings.TrimSpace(*req.TGAPIBase)
+	}
+	if !env.TelegramEnabled() {
+		writeErr(w, http.StatusBadRequest, "telegram bot token and chat id are required")
+		return
+	}
+	if err := env.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+
+	host, _ := os.Hostname()
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	if err := watchdog.SendTelegram(ctx, &http.Client{Timeout: 10 * time.Second}, env, watchdog.TestMessage(host)); err != nil {
+		audit("watchdog telegram test failed: %v", err)
+		writeErr(w, http.StatusBadGateway, "telegram delivery failed: %v", err)
+		return
+	}
+	audit("watchdog telegram test sent")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "sent", "chat_id": env.TGChatID, "api_base": env.TGAPIBase,
+	})
 }
 
 // ensureWatchdogAssets installs the canonical frp-watchdog helper + unit

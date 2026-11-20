@@ -116,6 +116,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/gre/{name}/test", s.authed(s.handleGRETest))
 
 	// --- FRP over GRE Reverse quick-setup wizard (Iran entry + Foreign exit) ---
+	mux.HandleFunc("GET /api/wizard/gre-frp/defaults", s.authed(s.handleWizardDefaults))
 	mux.HandleFunc("POST /api/wizard/gre-frp", s.authed(s.handleWizardGREFRP))
 
 	// --- turbo (kernel tuning + ZRAM) ---
@@ -136,6 +137,7 @@ func (s *Server) Routes() http.Handler {
 	// --- watchdog ---
 	mux.HandleFunc("GET /api/watchdog", s.authed(s.handleWatchdogGet))
 	mux.HandleFunc("POST /api/watchdog", s.authed(s.handleWatchdogPost))
+	mux.HandleFunc("POST /api/watchdog/test-telegram", s.authed(s.handleWatchdogTestTelegram))
 
 	// --- embedded frontend (Alpine.js + HTMX dashboard) ---
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.webFS))))

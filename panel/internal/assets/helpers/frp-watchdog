@@ -14,6 +14,9 @@
 #
 # Config: /etc/frp-panel/watchdog.env
 #   INTERVAL=15  THRESHOLD=3  COOLDOWN=60  PING_TIMEOUT=2  TCP_TIMEOUT=3
+#   TG_BOT_TOKEN=  TG_CHAT_ID=  TG_API_BASE=https://api.telegram.org
+# Telegram alerts are optional; both TG_BOT_TOKEN and TG_CHAT_ID must be set.
+# TG_API_BASE can point at a Cloudflare Worker reverse proxy on blocked hosts.
 # Canonical copy: panel/internal/assets/helpers/frp-watchdog (also embedded in frp-panel).
 set -uo pipefail   # deliberately NOT set -e: probe failures must not kill the loop
 
@@ -24,6 +27,7 @@ LOG_DIR="/var/log/frp-panel"
 STATE_DIR="/var/lib/frp-panel/watchdog"
 
 INTERVAL=15; THRESHOLD=3; COOLDOWN=60; PING_TIMEOUT=2; TCP_TIMEOUT=3
+TG_BOT_TOKEN=""; TG_CHAT_ID=""; TG_API_BASE="https://api.telegram.org"
 # shellcheck disable=SC1090
 [[ -r "$CONF" ]] && source "$CONF"
 
@@ -37,6 +41,33 @@ log() {
     line="$(date -Is) frp-watchdog: $*"
     echo "$line" >> "$LOG_DIR/watchdog.log" 2>/dev/null || true
     echo "$line"
+}
+
+tg_notify() { # tg_notify <layer> <unit> <reason> <consecutive> <result>
+    [[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] || return 0
+    local layer="$1" unit="$2" reason="$3" consec="$4" result="$5"
+    case "$layer" in
+        gre|GRE) layer="GRE" ;;
+        frp|FRP) layer="FRP" ;;
+    esac
+    # Best-effort and strictly off the critical path: the watchdog loop never
+    # waits for Telegram, even when the API is slow, blocked or unreachable.
+    (
+        local base="${TG_API_BASE:-https://api.telegram.org}"
+        base="${base%/}"
+        local host text
+        host="$(hostname 2>/dev/null || echo unknown-host)"
+        text="$(printf 'FRP Tunnel Suite heal event\nHost: %s\nLayer: %s\nUnit: %s\nReason: %s\nConsecutive failures: %s\nResult: %s' \
+            "$host" "$layer" "$unit" "$reason" "$consec" "$result")"
+        if ! curl -fsS --max-time 5 \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${text}" \
+            --data-urlencode "disable_web_page_preview=true" \
+            "${base}/bot${TG_BOT_TOKEN}/sendMessage" >/dev/null 2>&1; then
+            printf '%s frp-watchdog: TELEGRAM delivery failed layer=%s unit=%s\n' \
+                "$(date -Is)" "$layer" "$unit" >> "$LOG_DIR/watchdog.log" 2>/dev/null || true
+        fi
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 fail_bump() { # fail_bump <key> ok|fail — echoes current consecutive-failure count
@@ -68,10 +99,12 @@ heal() { # heal <unit> <key> <reason> [layer] [consecutive] — 0 when restarted
     date +%s > "$STATE_DIR/$key.last"
     if systemctl restart "$unit" 2>/dev/null; then
         log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=ok"
+        tg_notify "$layer" "$unit" "$reason" "$consec" "ok"
         echo 0 > "$STATE_DIR/$key.fails"
         return 0
     fi
     log "HEAL action=restart layer=$layer unit=$unit reason=\"$reason\" consecutive=$consec result=failed"
+    tg_notify "$layer" "$unit" "$reason" "$consec" "fail"
     return 1
 }
 
@@ -144,8 +177,10 @@ restart_active_frpc() { # restart_active_frpc <reason>
     for unit in $(active_frpc_units); do
         if systemctl restart "$unit" 2>/dev/null; then
             log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=ok"
+            tg_notify "GRE" "$unit" "$1" "after GRE rebuild" "ok"
         else
             log "HEAL action=restart-frpc layer=gre unit=$unit reason=\"$1\" result=failed"
+            tg_notify "GRE" "$unit" "$1" "after GRE rebuild" "fail"
         fi
     done
 }
@@ -219,7 +254,7 @@ check_frpc() {
     done
 }
 
-log "watchdog started (interval=${INTERVAL}s threshold=${THRESHOLD} cooldown=${COOLDOWN}s)"
+log "watchdog started (interval=${INTERVAL}s threshold=${THRESHOLD} cooldown=${COOLDOWN}s telegram=$([[ -n "${TG_BOT_TOKEN:-}" && -n "${TG_CHAT_ID:-}" ]] && echo on || echo off))"
 while true; do
     check_gre
     check_frpc

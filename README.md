@@ -63,26 +63,50 @@ IP**, at the same forwarded port.
 ### One-step setup (recommended)
 
 1. **Iran (entry)** — Dashboard → *FRP over GRE Reverse — Quick Setup* →
-   **Iran Node**. Enter the Iran and Foreign public IPs; keep `gt11`, control
-   port `7025` and a protocol. The wizard creates:
-   - `gt11` with `10.100.111.2/30 ↔ 10.100.111.1/30`, MTU `1400`, `NOTRACK`
-     for proto 47 and TCPMSS clamping;
-   - a fresh 32-char token and an `frps` instance bound **strictly** to
-     `10.100.111.2:<control_port>`, then enables both units;
+   **Iran Node**. The form is pre-filled with the next free interface,
+   `/30` subnet and control port (`gt11` / `10.100.111.0/30` / `7025` on a
+   fresh host). The wizard creates:
+   - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1400`,
+     `NOTRACK` for proto 47 and TCPMSS clamping;
+   - a fresh 32-char token and an `frps` instance bound **strictly** to the
+     tunnel IP (`…2:<control_port>`), then enables both units;
    - the dual-layer auto-heal watchdog (`frp-watchdog`, 15s interval, 3 strikes,
      60s cooldown) — untick the wizard toggle to opt out.
+
+   If the requested interface, subnet or port is already busy, the wizard
+   allocates the next free one (`gt12`, `10.100.112.0/30`, `7026`) and reports
+   the switch in the result banner, so one Iran server can drive several
+   Foreign nodes.
 
    Copy the generated **mirror payload** (or the equivalent CLI command).
 2. **Foreign (exit)** — run the same wizard on the Foreign node, choose
    **Foreign Node**, paste the payload, and enter the local ports to expose
-   (`8443,2053,443`) plus the TCP/UDP toggle. It creates the mirrored `gt11`
-   (`10.100.111.1/30 ↔ 10.100.111.2/30`) and an `frpc` instance with
-   `tls.enable = true`, per-proxy `useEncryption = true`,
-   `useCompression = false`, then pings `10.100.111.2` through `gt11` and
-   reports the frpc unit state. It also allocates the loopback metrics
-   `webServer` port the watchdog uses for proxy health.
+   (`8443,2053,443`) plus the TCP/UDP toggle. It creates the mirrored GRE
+   tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed without touching the
+   mirrored `/30`) and an `frpc` instance with `tls.enable = true`, per-proxy
+   `useEncryption = true`, `useCompression = false`, then pings the Iran tunnel
+   IP through the interface and reports the frpc unit state. It also allocates
+   the loopback metrics `webServer` port the watchdog uses for proxy health.
 3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
    `1.2.3.4:443`).
+
+### Telegram alerts (optional)
+
+`frp-watchdog` can notify a Telegram chat on every heal event (layer, unit,
+reason, consecutive failures, result). Configure it in **Watchdog → Telegram
+alerts** (token, chat ID, optional API base) and press **Send test alert**, or
+from the CLI:
+
+```sh
+frp-manager watchdog telegram --token '123456:ABC…' --chat -1001234567890
+frp-manager watchdog test-telegram
+# Iran servers where Telegram is blocked: point at a Worker reverse proxy
+frp-manager watchdog telegram --api-base https://tg.example.workers.dev
+```
+
+The bot token is masked in API responses and redacted in secret-free backups.
+Delivery runs in a background `curl --max-time 5` and can never stall the heal
+loop.
 
 The same flow exists in the CLI: `frp-manager` → **14) FRP over GRE Reverse
 (Quick Setup)**, or non-interactively:
@@ -164,9 +188,9 @@ documented in `panel/internal/api/router.go`.
 | frpc instances | `GET/POST /api/clients` · `GET/PUT/DELETE /api/clients/{name}` · `POST/PUT/DELETE /api/clients/{name}/proxies` · `GET/PUT /api/clients/{name}/raw` |
 | services | `GET /api/services` · `POST /api/services/{unit}/action` |
 | GRE tunnels | `GET/POST /api/gre` · `GET/DELETE /api/gre/{name}` · `GET /api/gre/{name}/mirror` · `POST /api/gre/{name}/test` |
-| reverse wizard | `POST /api/wizard/gre-frp` (`role=iran` creates entry frps + gt11 and returns the mirror payload; `role=foreign` creates the mirrored gt11 + frpc and runs the link test) |
+| reverse wizard | `GET /api/wizard/gre-frp/defaults` (next free iface/subnet/port) · `POST /api/wizard/gre-frp` (`role=iran` creates entry frps + GRE and returns the mirror payload, auto-allocating on conflict; `role=foreign` creates the mirrored GRE + frpc and runs the link test) |
 | turbo | `GET/POST /api/system/turbo` |
 | monitoring | `GET /api/monitor/latency(/stream)` (SSE) · `GET /api/logs/units` · `GET /api/logs/stream?unit=…` (SSE) · `GET /api/stats` |
 | backup | `GET /api/backup/export[?secrets=1]` · `POST /api/backup/import` |
-| watchdog | `GET/POST /api/watchdog` |
+| watchdog | `GET/POST /api/watchdog` · `POST /api/watchdog/test-telegram` |
 | misc | `GET /api/health` · `GET /api/version` |

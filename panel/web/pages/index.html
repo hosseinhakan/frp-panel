@@ -293,6 +293,10 @@
                           <input class="input mono" x-model="rev.iface" placeholder="gt11">
                         </div>
                         <div class="field">
+                          <label>GRE subnet (/30)</label>
+                          <input class="input mono" x-model="rev.subnet" placeholder="10.100.111.0/30">
+                        </div>
+                        <div class="field">
                           <label>Tunnel control port</label>
                           <input class="input mono" type="number" min="1" max="65535" x-model.number="rev.controlPort">
                         </div>
@@ -306,9 +310,12 @@
                         </div>
                       </div>
                       <p class="faint small mt05">
-                        Creates gt11 (<span class="mono">10.100.111.2/30 ↔ 10.100.111.1/30</span>, MTU 1400,
+                        Creates <span class="mono" x-text="rev.iface || 'gt11'"></span>
+                        (<span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.2/30')"></span> ↔
+                        <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1400,
                         NOTRACK proto 47, TCPMSS clamp 1240/1220), generates a 32-char token, and binds frps
                         strictly to the tunnel IP so it is invisible on the public internet.
+                        Busy interfaces, subnets and ports are re-allocated automatically.
                       </p>
                       <template x-if="rev.error"><div class="notice bad mt05"><span x-text="rev.error"></span></div></template>
                       <div class="modal-foot">
@@ -394,6 +401,13 @@
                   <!-- step 3: result -->
                   <template x-if="rev.step === 'result'">
                     <div>
+                      <template x-if="rev.result.warnings && rev.result.warnings.length">
+                        <div class="notice warn mb05">
+                          <template x-for="w in rev.result.warnings" :key="w">
+                            <div x-text="'• ' + w"></div>
+                          </template>
+                        </div>
+                      </template>
                       <template x-if="rev.role === 'iran'">
                         <div>
                           <div class="row mb05">
@@ -1586,6 +1600,38 @@
                       <input class="input mono" type="number" min="1" x-model.number="form.tcpTimeout">
                     </div>
                   </div>
+
+                  <p class="navgroup-label mt1">
+                    Telegram alerts (optional)
+                    <span class="pill" :class="telegramEnabled ? 'ok' : 'idle'" x-text="telegramEnabled ? 'configured' : 'off'"></span>
+                  </p>
+                  <div class="field-row">
+                    <div class="field">
+                      <label>Bot token</label>
+                      <input class="input mono" type="password" autocomplete="new-password"
+                             x-model="form.tgBotToken"
+                             :placeholder="form.tgTokenMasked ? 'configured ' + form.tgTokenMasked + ' — blank keeps it' : '123456:ABC…'">
+                    </div>
+                    <div class="field">
+                      <label>Chat ID</label>
+                      <input class="input mono" x-model="form.tgChatId" placeholder="-100… or @channel">
+                    </div>
+                  </div>
+                  <div class="field mt05">
+                    <label>API base (optional — use a Worker proxy where Telegram is blocked)</label>
+                    <input class="input mono" x-model="form.tgApiBase" placeholder="https://api.telegram.org">
+                  </div>
+                  <label class="check mt05">
+                    <input type="checkbox" x-model="form.clearTelegram">
+                    Clear the stored Telegram token and chat ID
+                  </label>
+                  <div class="btn-row mt05">
+                    <button type="button" class="btn" :disabled="tgBusy" @click="testTelegram()">
+                      Send test alert
+                    </button>
+                    <span class="faint small">Delivery is best-effort and never blocks the heal loop.</span>
+                  </div>
+
                   <p class="faint small mt05">Values merge over the current env; invalid entries are rejected, never silently defaulted.</p>
                   <button class="btn primary mt1" :disabled="busy" @click="save()">Save &amp; apply</button>
                 </div>

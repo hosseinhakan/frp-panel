@@ -76,10 +76,10 @@ type Manifest struct {
 
 // ExportSummary reports what Export wrote.
 type ExportSummary struct {
-	Files           int               `json:"files"`
-	Categories      map[string]int    `json:"categories"`
-	SecretsIncluded bool              `json:"secrets_included"`
-	Redacted        int               `json:"redacted_files"`
+	Files           int            `json:"files"`
+	Categories      map[string]int `json:"categories"`
+	SecretsIncluded bool           `json:"secrets_included"`
+	Redacted        int            `json:"redacted_files"`
 }
 
 // ImportOptions controls an import.
@@ -95,15 +95,15 @@ type ImportOptions struct {
 // ImportSummary reports what Import did. The API layer performs the
 // systemctl actions (daemon-reload, restarts) from this data.
 type ImportSummary struct {
-	Manifest         *Manifest          `json:"manifest,omitempty"`
-	Categories       []string           `json:"categories"`
-	Restored         map[string]string `json:"restored"`            // entry → host path
-	Skipped          []string           `json:"skipped,omitempty"`   // entries not selected / unknown
-	Backups          []string           `json:"backups,omitempty"`   // .bak-<ts> copies taken
-	Regenerated      []string           `json:"regenerated,omitempty"` // files that got fresh secrets
-	AffectedUnits    []string           `json:"affected_units,omitempty"`
-	DaemonReload     bool               `json:"daemon_reload"`       // systemd files were restored
-	RestartPanelHint bool               `json:"restart_panel_hint,omitempty"`
+	Manifest         *Manifest         `json:"manifest,omitempty"`
+	Categories       []string          `json:"categories"`
+	Restored         map[string]string `json:"restored"`              // entry → host path
+	Skipped          []string          `json:"skipped,omitempty"`     // entries not selected / unknown
+	Backups          []string          `json:"backups,omitempty"`     // .bak-<ts> copies taken
+	Regenerated      []string          `json:"regenerated,omitempty"` // files that got fresh secrets
+	AffectedUnits    []string          `json:"affected_units,omitempty"`
+	DaemonReload     bool              `json:"daemon_reload"` // systemd files were restored
+	RestartPanelHint bool              `json:"restart_panel_hint,omitempty"`
 }
 
 // backupTimestamp matches the suite's .bak suffix format.
@@ -182,6 +182,13 @@ func Export(w io.Writer, paths svc.Paths, includeSecrets bool, now time.Time) (*
 		name := it.name
 		if !includeSecrets && strings.HasSuffix(name, ".toml") {
 			red, n := RedactTOMLSecrets(string(raw))
+			if n > 0 {
+				raw = []byte(red)
+				summary.Redacted++
+			}
+		}
+		if !includeSecrets && name == "etc/frp-panel/watchdog.env" {
+			red, n := RedactWatchdogEnv(string(raw))
 			if n > 0 {
 				raw = []byte(red)
 				summary.Redacted++
@@ -283,6 +290,46 @@ func RedactTOMLSecrets(raw string) (string, int) {
 		return "", nil
 	})
 	return out, n
+}
+
+// RedactWatchdogEnv replaces the optional Telegram bot token with the
+// REDACTED placeholder for secret-free exports. Chat id and API base are not
+// credentials and stay readable.
+func RedactWatchdogEnv(raw string) (string, int) {
+	lines := strings.Split(raw, "\n")
+	n := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "TG_BOT_TOKEN=") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(trimmed, "TG_BOT_TOKEN="))
+		if val == "" {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "TG_BOT_TOKEN=" + Redacted
+		n++
+	}
+	if n == 0 {
+		return raw, 0
+	}
+	return strings.Join(lines, "\n"), n
+}
+
+// ClearRedactedWatchdogToken removes a redaction placeholder on import so the
+// restored helper does not try to authenticate with a literal "REDACTED".
+func ClearRedactedWatchdogToken(raw string) string {
+	lines := strings.Split(raw, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "TG_BOT_TOKEN=") &&
+			strings.TrimSpace(strings.TrimPrefix(trimmed, "TG_BOT_TOKEN=")) == Redacted {
+			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			lines[i] = indent + "TG_BOT_TOKEN="
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // regenerateTOMLSecrets swaps REDACTED placeholders for fresh random
@@ -522,6 +569,9 @@ func Import(zr *zip.Reader, paths svc.Paths, opts ImportOptions, now time.Time) 
 				content = []byte(regen)
 				summary.Regenerated = append(summary.Regenerated, st.name)
 			}
+		}
+		if st.name == "etc/frp-panel/watchdog.env" {
+			content = []byte(ClearRedactedWatchdogToken(string(content)))
 		}
 
 		target, ok := targetPath(paths, st.name)

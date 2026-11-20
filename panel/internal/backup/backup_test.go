@@ -313,10 +313,10 @@ func TestImportSymlinkEntryRejected(t *testing.T) {
 func TestImportUnknownPathsSkipped(t *testing.T) {
 	paths, _ := buildEnv(t)
 	zr := craftZip(t, map[string]string{
-		"root/evil.sh":              "rm -rf /",
-		"etc/passwd":                "root:x:0:0",
+		"root/evil.sh":               "rm -rf /",
+		"etc/passwd":                 "root:x:0:0",
 		"etc/sysctl.d/99-other.conf": "x=1",
-		"etc/frp-panel/evil.env":    "EVIL=1",
+		"etc/frp-panel/evil.env":     "EVIL=1",
 	}, nil)
 	sum, err := Import(zr, paths, ImportOptions{}, epoch)
 	if err != nil {
@@ -336,7 +336,7 @@ func TestImportForeignUnitRejected(t *testing.T) {
 	paths, _ := buildEnv(t)
 	zr := craftZip(t, map[string]string{
 		"etc/systemd/system/sshd.service": "[Unit]\n",
-		"root/frp/server/../../evil":     "x",
+		"root/frp/server/../../evil":      "x",
 	}, nil)
 	if _, err := Import(zr, paths, ImportOptions{}, epoch); err == nil {
 		t.Fatal("foreign unit inside a suite path accepted")
@@ -377,8 +377,8 @@ func TestImportAtomicityOnPoisonTail(t *testing.T) {
 	// A valid entry followed by a poisoned one must restore NOTHING.
 	paths, _ := buildEnv(t)
 	zr := craftZip(t, map[string]string{
-		"root/frp/server/good.toml":  "bindPort = 1\n",
-		"root/frp/server/bad.toml.":  "x", // dot-segment variant rejected late in iteration order
+		"root/frp/server/good.toml": "bindPort = 1\n",
+		"root/frp/server/bad.toml.": "x", // dot-segment variant rejected late in iteration order
 	}, nil)
 	if _, err := Import(zr, paths, ImportOptions{}, epoch); err == nil {
 		t.Fatal("poisoned archive accepted")
@@ -401,7 +401,7 @@ func TestImportPanelConfig(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), "restored-hash") {
 		t.Fatalf("panel.toml not restored: %v", err)
 	}
-	if !fileExists(paths.PanelCfg+".bak-"+backupTimestamp(epoch)) {
+	if !fileExists(paths.PanelCfg + ".bak-" + backupTimestamp(epoch)) {
 		t.Fatal("panel.toml not .bak'd")
 	}
 	if !sum.RestartPanelHint {
@@ -428,6 +428,70 @@ func TestRedactTOMLSecretsStyles(t *testing.T) {
 	}
 	if _, n := RedactTOMLSecrets("bindPort = 1\n"); n != 0 {
 		t.Fatal("secret-free file must be untouched")
+	}
+}
+
+func TestRedactWatchdogEnvToken(t *testing.T) {
+	raw := "# FRP Tunnel Suite watchdog tuning\nINTERVAL=15\nTG_BOT_TOKEN=123456:ABC_def-ghijklmnop\n" +
+		"TG_CHAT_ID=-1001234567890\nTG_API_BASE=https://api.telegram.org\n"
+	out, n := RedactWatchdogEnv(raw)
+	if n != 1 {
+		t.Fatalf("replaced %d lines, want 1:\n%s", n, out)
+	}
+	if strings.Contains(out, "123456:ABC_def-ghijklmnop") || !strings.Contains(out, "TG_BOT_TOKEN="+Redacted) {
+		t.Fatalf("token not redacted:\n%s", out)
+	}
+	if !strings.Contains(out, "TG_CHAT_ID=-1001234567890") {
+		t.Fatal("chat id must stay readable")
+	}
+	if _, n := RedactWatchdogEnv("INTERVAL=15\nTG_BOT_TOKEN=\n"); n != 0 {
+		t.Fatal("empty token must not count as redacted")
+	}
+	if cleared := ClearRedactedWatchdogToken(out); strings.Contains(cleared, Redacted) ||
+		!strings.Contains(cleared, "TG_BOT_TOKEN=\n") {
+		t.Fatalf("placeholder not cleared on import:\n%s", cleared)
+	}
+}
+
+func TestExportRedactsWatchdogToken(t *testing.T) {
+	paths, _ := buildEnv(t)
+	write(t, paths.EtcPanelDir, "watchdog.env",
+		"INTERVAL=15\nTHRESHOLD=3\nCOOLDOWN=60\nPING_TIMEOUT=2\nTCP_TIMEOUT=3\n"+
+			"TG_BOT_TOKEN=123456:ABC_def-ghijklmnop\nTG_CHAT_ID=-1001234567890\nTG_API_BASE=https://api.telegram.org\n")
+	var buf bytes.Buffer
+	sum, err := Export(&buf, paths, false, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Redacted != 4 { // three TOMLs + watchdog.env
+		t.Fatalf("redacted %d files, want 4", sum.Redacted)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range zr.File {
+		if f.Name != "etc/frp-panel/watchdog.env" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(rc)
+		rc.Close()
+		found = true
+		if strings.Contains(string(b), "123456:ABC_def-ghijklmnop") ||
+			!strings.Contains(string(b), "TG_BOT_TOKEN="+Redacted) {
+			t.Fatalf("watchdog token leaked:\n%s", b)
+		}
+		if !strings.Contains(string(b), "TG_CHAT_ID=-1001234567890") {
+			t.Fatal("chat id should be exported")
+		}
+	}
+	if !found {
+		t.Fatal("watchdog.env missing from export")
 	}
 }
 

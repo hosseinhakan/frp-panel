@@ -1,7 +1,9 @@
 package api
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,14 +136,143 @@ func TestWatchdogDisable(t *testing.T) {
 	}
 }
 
+func TestWatchdogTelegramGetMasksAndPostPreserves(t *testing.T) {
+	e := newTestEnv(t)
+	seedWatchdogState(t, e)
+
+	env := watchdog.Default()
+	env.TGBotToken = "123456:ABC_def-ghijklmnop"
+	env.TGChatID = "-1001234567890"
+	env.TGAPIBase = "https://tg.example.workers.dev"
+	if err := os.WriteFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"),
+		[]byte(watchdog.Render(env)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.authorized(http.MethodGet, "/api/watchdog", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	if resp["telegram_enabled"] != true {
+		t.Errorf("telegram_enabled = %v, want true", resp["telegram_enabled"])
+	}
+	cfg, _ := resp["config"].(map[string]any)
+	tok, _ := cfg["tg_bot_token"].(string)
+	if tok == env.TGBotToken || !strings.Contains(tok, "••••") {
+		t.Fatalf("token not masked: %q", tok)
+	}
+	if cfg["tg_chat_id"] != env.TGChatID {
+		t.Errorf("chat id = %v", cfg["tg_chat_id"])
+	}
+
+	// A blank token keeps the stored one; chat and API base may change.
+	rec = e.authorized(http.MethodPost, "/api/watchdog",
+		`{"enabled":true,"tgBotToken":"","tgChatId":"-100999","tgApiBase":"https://api.telegram.org"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := watchdog.Parse(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TGBotToken != env.TGBotToken {
+		t.Errorf("blank POST wiped the token: %q", got.TGBotToken)
+	}
+	if got.TGChatID != "-100999" || got.TGAPIBase != "https://api.telegram.org" {
+		t.Errorf("telegram update = %+v", got)
+	}
+
+	// The masked placeholder echoed by the UI must never overwrite the token.
+	rec = e.authorized(http.MethodPost, "/api/watchdog",
+		`{"enabled":true,"tgBotToken":"`+tok+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("masked POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ = os.ReadFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"))
+	if got, err = watchdog.Parse(string(raw)); err != nil || got.TGBotToken != env.TGBotToken {
+		t.Fatalf("masked token overwrote the secret: %+v err=%v", got, err)
+	}
+
+	// Explicit clear wipes all telegram fields.
+	rec = e.authorized(http.MethodPost, "/api/watchdog", `{"enabled":true,"clearTelegram":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear POST = %d: %s", rec.Code, rec.Body.String())
+	}
+	raw, _ = os.ReadFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"))
+	if got, err = watchdog.Parse(string(raw)); err != nil || got.TelegramEnabled() {
+		t.Fatalf("clearTelegram left credentials: %+v err=%v", got, err)
+	}
+}
+
+func TestWatchdogTestTelegram(t *testing.T) {
+	var gotPath, gotChat, gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = r.ParseForm()
+		gotChat = r.Form.Get("chat_id")
+		gotText = r.Form.Get("text")
+		_, _ = io.WriteString(w, `{"ok":true,"result":{}}`)
+	}))
+	defer srv.Close()
+
+	e := newTestEnv(t)
+	seedWatchdogState(t, e)
+	env := watchdog.Default()
+	env.TGBotToken = "123456:ABC_def-ghijklmnop"
+	env.TGChatID = "-1001234567890"
+	env.TGAPIBase = srv.URL
+	if err := os.WriteFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"),
+		[]byte(watchdog.Render(env)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.authorized(http.MethodPost, "/api/watchdog/test-telegram", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test-telegram = %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/bot123456:ABC_def-ghijklmnop/sendMessage" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotChat != "-1001234567890" || !strings.Contains(gotText, "test alert") {
+		t.Errorf("form = chat %q text %q", gotChat, gotText)
+	}
+
+	// Missing credentials: 400, not a network call.
+	e2 := newTestEnv(t)
+	seedWatchdogState(t, e2)
+	if rec := e2.authorized(http.MethodPost, "/api/watchdog/test-telegram", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("missing creds = %d, want 400", rec.Code)
+	}
+
+	// Telegram rejecting the token surfaces as 502.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"ok":false,"description":"Unauthorized"}`)
+	}))
+	defer bad.Close()
+	env.TGAPIBase = bad.URL
+	if err := os.WriteFile(filepath.Join(e.srv.paths.EtcPanelDir, "watchdog.env"),
+		[]byte(watchdog.Render(env)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := e.authorized(http.MethodPost, "/api/watchdog/test-telegram", ""); rec.Code != http.StatusBadGateway {
+		t.Errorf("upstream failure = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWatchdogValidation(t *testing.T) {
 	e := newTestEnv(t)
 	seedWatchdogState(t, e)
 	for _, body := range []string{
-		`{"enabled":true,"interval":5}`,    // below the CLI's >= 10 rule
-		`{"enabled":true,"threshold":0}`,   // threshold >= 1
+		`{"enabled":true,"interval":5}`,  // below the CLI's >= 10 rule
+		`{"enabled":true,"threshold":0}`, // threshold >= 1
 		`{"enabled":true,"cooldown":-1}`,
-		`{}`,                                // missing enabled switch
+		`{}`, // missing enabled switch
 	} {
 		rec := e.authorized(http.MethodPost, "/api/watchdog", body)
 		if rec.Code != http.StatusBadRequest {

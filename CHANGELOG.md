@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Telegram alerts (`frp-watchdog`)
+
+- Optional `TG_BOT_TOKEN`, `TG_CHAT_ID` and `TG_API_BASE` in
+  `/etc/frp-panel/watchdog.env`; every heal posts a plain-text alert
+  (host/layer/unit/reason/consecutive/result) from a background
+  `curl --max-time 5`, so delivery can never stall the heal loop.
+- Watchdog UI + API: token input (masked on `GET`, preserved on blank `POST`),
+  chat ID, API base (Worker proxy for blocked hosts) and
+  `POST /api/watchdog/test-telegram` with a **Send test alert** button.
+- `frp-manager watchdog telegram|test-telegram`.
+- Bot token redacted in secret-free backup exports and cleared on import.
+
+### Multi-tunnel reverse wizard
+
+- `GET /api/wizard/gre-frp/defaults` returns the next free interface, `/30`
+  subnet and control port (scans envs, live links, frps configs and
+  `/proc/net/tcp`); the wizard pre-fills the Iran form.
+- `POST /api/wizard/gre-frp` and `frp-manager reverse` auto-allocate on
+  conflict (`gt11`→`gt12`, `10.100.111.0/30`→`10.100.112.0/30`,
+  `7025`→`7026`) and report each switch in `warnings`.
+- Foreign exits rename only their local interface when it is already taken,
+  keeping the mirrored `/30` intact.
+
 ## v1.0.0 — the complete Tunnel & FRP Management Suite
 
 First tagged release: `frp-manager` (bash CLI) + `frp-panel` (Go web panel,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frp-suite/panel/internal/gre"
 	"github.com/frp-suite/panel/internal/watchdog"
 )
 
@@ -288,6 +289,226 @@ func TestWizardValidation(t *testing.T) {
 	entries, _ := os.ReadDir(e.srv.paths.GREDir)
 	if len(entries) != 0 {
 		t.Errorf("failed wizard left %d GRE files", len(entries))
+	}
+}
+
+// seedWizardTunnel writes an existing GRE env (different public IPs unless
+// the test wants the same pair).
+func seedWizardTunnel(t *testing.T, e *testEnv, iface, localPub, remotePub, octet string) {
+	t.Helper()
+	if err := gre.Write(e.srv.paths.GREDir, gre.Tunnel{
+		Name:            iface,
+		Iface:           iface,
+		LocalPublicIP:   localPub,
+		RemotePublicIP:  remotePub,
+		LocalPrivateIP:  "10.100." + octet + ".2/30",
+		RemotePrivateIP: "10.100." + octet + ".1/30",
+		MTU:             1400,
+		MSSMode:         "1220",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWizardDefaultsSkipBusyIfaceSubnetAndPort(t *testing.T) {
+	e := newTestEnv(t)
+	seedWizardTunnel(t, e, "gt11", "9.9.9.9", "8.8.8.8", "111")
+	if err := os.MkdirAll(e.srv.paths.ServerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.srv.paths.ServerDir, "server-7025.toml"),
+		[]byte("bindPort = 7025\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.authorized(http.MethodGet, "/api/wizard/gre-frp/defaults", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("defaults = %d: %s", rec.Code, rec.Body.String())
+	}
+	d := jsonMap(t, rec)
+	if d["iface"] != "gt12" {
+		t.Errorf("iface = %v, want gt12", d["iface"])
+	}
+	if d["subnet"] != "10.100.112.0/30" {
+		t.Errorf("subnet = %v, want 10.100.112.0/30", d["subnet"])
+	}
+	if d["localPrivateIp"] != "10.100.112.2/30" || d["remotePrivateIp"] != "10.100.112.1/30" {
+		t.Errorf("private pair = %v/%v", d["localPrivateIp"], d["remotePrivateIp"])
+	}
+	if d["controlPort"] != float64(7026) {
+		t.Errorf("controlPort = %v, want 7026", d["controlPort"])
+	}
+	if d["serverAddr"] != "10.100.112.2" {
+		t.Errorf("serverAddr = %v", d["serverAddr"])
+	}
+}
+
+func TestWizardIranAutoFallbackOnBusyTunnelAndPort(t *testing.T) {
+	e := newTestEnv(t)
+	seedWizardTunnel(t, e, "gt11", "9.9.9.9", "8.8.8.8", "111")
+	if err := os.MkdirAll(e.srv.paths.ServerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.srv.paths.ServerDir, "server-7025.toml"),
+		[]byte("bindPort = 7025\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt12" {
+		t.Errorf("iface = %v, want gt12", tunnel["iface"])
+	}
+	if tunnel["local_private_ip"] != "10.100.112.2/30" || tunnel["remote_private_ip"] != "10.100.112.1/30" {
+		t.Errorf("private pair = %v/%v", tunnel["local_private_ip"], tunnel["remote_private_ip"])
+	}
+	server, _ := resp["server"].(map[string]any)
+	if server["bindPort"] != float64(7026) || server["bindAddr"] != "10.100.112.2" {
+		t.Errorf("server = %v, want 10.100.112.2:7026", server)
+	}
+
+	warnings, _ := resp["warnings"].([]any)
+	joined := ""
+	for _, w := range warnings {
+		joined += w.(string) + "\n"
+	}
+	for _, want := range []string{
+		"gt11 was busy; allocated gt12",
+		"port 7025 was in use; switched to 7026",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings missing %q:\n%s", want, joined)
+		}
+	}
+
+	payload, _ := resp["mirror_payload"].(string)
+	for _, want := range []string{
+		"IFACE=gt12",
+		"CONTROL_PORT=7026",
+		"SERVER_ADDR=10.100.112.2",
+		"LOCAL_PRIVATE_IP=10.100.112.1/30",
+		"REMOTE_PRIVATE_IP=10.100.112.2/30",
+	} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("mirror payload missing %q:\n%s", want, payload)
+		}
+	}
+	if !e.runner.called("systemctl:enable --now frps@server-7026") {
+		t.Error("frps@server-7026 not enabled")
+	}
+}
+
+func TestWizardIranRerunKeepsOwnTunnel(t *testing.T) {
+	e := newTestEnv(t)
+	seedWizardTunnel(t, e, "gt11", "1.2.3.4", "5.6.7.8", "111")
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","iface":"gt12","subnet":"10.100.112.0/30"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("rerun = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt11" || tunnel["local_private_ip"] != "10.100.111.2/30" {
+		t.Errorf("rerun cloned the tunnel instead of refreshing: %v", tunnel)
+	}
+	if warnings, _ := resp["warnings"].([]any); len(warnings) != 0 {
+		t.Errorf("rerun warned: %v", warnings)
+	}
+}
+
+func TestWizardIranRerunReusesServerPort(t *testing.T) {
+	e := newTestEnv(t)
+	body := `{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8"}`
+	if rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp", body); rec.Code != http.StatusCreated {
+		t.Fatalf("first run = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("rerun = %d: %s", rec.Code, rec.Body.String())
+	}
+	server, _ := jsonMap(t, rec)["server"].(map[string]any)
+	if server["name"] != "server-7025" || server["bindPort"] != float64(7025) {
+		t.Errorf("rerun allocated a second instance: %v", server)
+	}
+	if _, err := os.Stat(filepath.Join(e.srv.paths.ServerDir, "server-7026.toml")); err == nil {
+		t.Error("rerun created server-7026.toml")
+	}
+}
+
+func TestWizardForeignRerunRefreshesClient(t *testing.T) {
+	e := newTestEnv(t)
+	payload := "IFACE=gt11\n" +
+		"LOCAL_PUBLIC_IP=5.6.7.8\n" +
+		"REMOTE_PUBLIC_IP=1.2.3.4\n" +
+		"LOCAL_PRIVATE_IP=10.100.111.1/30\n" +
+		"REMOTE_PRIVATE_IP=10.100.111.2/30\n" +
+		"MTU=1400\nMSS_MODE=1220\n" +
+		"SERVER_ADDR=10.100.111.2\nCONTROL_PORT=7025\nPROTOCOL=tcp\n" +
+		"TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) + `,"localPorts":"443,2053","proto":"tcp"}`
+	for i := 0; i < 2; i++ {
+		rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("run %d = %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	entries, err := os.ReadDir(e.srv.paths.ClientDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tomls []string
+	for _, ent := range entries {
+		if strings.HasSuffix(ent.Name(), ".toml") {
+			tomls = append(tomls, ent.Name())
+		}
+	}
+	if len(tomls) != 1 || tomls[0] != "client-7025.toml" {
+		t.Errorf("rerun created duplicate clients: %v", tomls)
+	}
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7025.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), "[[proxies]]") != 2 {
+		t.Errorf("rerun duplicated proxies:\n%s", raw)
+	}
+}
+
+func TestWizardForeignIfaceFallbackKeepsMirroredSubnet(t *testing.T) {
+	e := newTestEnv(t)
+	seedWizardTunnel(t, e, "gt11", "7.7.7.7", "6.6.6.6", "120")
+
+	payload := "IFACE=gt11\n" +
+		"LOCAL_PUBLIC_IP=5.6.7.8\n" +
+		"REMOTE_PUBLIC_IP=1.2.3.4\n" +
+		"LOCAL_PRIVATE_IP=10.100.111.1/30\n" +
+		"REMOTE_PRIVATE_IP=10.100.111.2/30\n" +
+		"MTU=1400\nMSS_MODE=1220\n" +
+		"SERVER_ADDR=10.100.111.2\nCONTROL_PORT=7025\nPROTOCOL=tcp\n" +
+		"TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"foreign","mirrorPayload":`+jsonQuote(payload)+`,"localPorts":"443","proto":"tcp"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("foreign = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt12" {
+		t.Errorf("iface = %v, want gt12", tunnel["iface"])
+	}
+	if tunnel["local_private_ip"] != "10.100.111.1/30" {
+		t.Errorf("mirrored subnet changed: %v", tunnel["local_private_ip"])
+	}
+	warnings, _ := resp["warnings"].([]any)
+	if len(warnings) == 0 || !strings.Contains(warnings[0].(string), "gt11 was busy locally") {
+		t.Errorf("warnings = %v", warnings)
 	}
 }
 

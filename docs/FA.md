@@ -303,10 +303,16 @@ sudo frp-manager
 # 14) FRP over GRE Reverse (Quick Setup) → 1) Iran node — entry / frps
 ```
 
-IP عمومی ایران و IP عمومی خارج را وارد کنید. ویزارد `gt11` را با
-`10.100.111.2/30 ↔ 10.100.111.1/30`، MTU `1400`، `NOTRACK` پروتکل ۴۷ و
-TCPMSS clamp می‌سازد، یک توکن ۳۲ کاراکتری تولید می‌کند، `frps` را **فقط** روی
-`10.100.111.2:7025` بالا می‌آورد و در پایان **mirror payload** را چاپ می‌کند.
+IP عمومی ایران و IP عمومی خارج را وارد کنید. نام اینترفیس و پورت کنترل به‌صورت
+خودکار با اولین مقدار آزاد پر می‌شوند (`gt11` / `7025` روی سرور تازه). ویزارد
+تانل را با `10.100.<n>.2/30 ↔ 10.100.<n>.1/30`، MTU `1400`، `NOTRACK` پروتکل
+۴۷ و TCPMSS clamp می‌سازد، یک توکن ۳۲ کاراکتری تولید می‌کند، `frps` را **فقط**
+روی IP تانل بالا می‌آورد و در پایان **mirror payload** را چاپ می‌کند.
+
+اگر `gt11` یا شبکه‌ی `/30` یا پورت `7025` قبلاً اشغال شده باشد، ویزارد خودش
+مقدار آزاد بعدی (`gt12`، `10.100.112.0/30`، `7026`) را انتخاب می‌کند و در
+خروجی هشدار می‌دهد؛ بنابراین یک سرور ایران می‌تواند چند تانل هم‌زمان به چند
+سرور خارج داشته باشد.
 
 **روی سرور خارج:**
 
@@ -316,11 +322,12 @@ sudo frp-manager
 ```
 
 payload را پیست کنید (یا فایل آن را بدهید)، پورت‌های محلی مثل `8443,2053,443`
-و حالت TCP/UDP را وارد کنید. ویزارد `gt11` قرینه
-(`10.100.111.1/30 ↔ 10.100.111.2/30`) و `frpc` با TLS و رمزنگاری per-proxy
-می‌سازد، سپس `10.100.111.2` را از داخل تانل ping می‌کند و وضعیت `frpc` را
-نشان می‌دهد. واچ‌داگ دولایه (`frp-watchdog`) هم به‌صورت پیش‌فرض فعال می‌شود
-(با تیک قابل غیرفعال‌کردن).
+و حالت TCP/UDP را وارد کنید. ویزارد تانل قرینه
+(`10.100.<n>.1/30 ↔ 10.100.<n>.2/30`) و `frpc` با TLS و رمزنگاری per-proxy
+می‌سازد، سپس IP تانل ایران را از داخل تانل ping می‌کند و وضعیت `frpc` را
+نشان می‌دهد. اگر نام اینترفیس محلی اشغال باشد، فقط نام اینترفیس عوض می‌شود
+(شبکه‌ی `/30` قرینه دست‌نخورده می‌ماند). واچ‌داگ دولایه (`frp-watchdog`) هم
+به‌صورت پیش‌فرض فعال می‌شود (با تیک قابل غیرفعال‌کردن).
 
 نسخه‌ی غیرتعاملی:
 
@@ -529,7 +536,7 @@ frp-manager gre create --local-public IP --remote-public IP \
 frp-manager gre delete gt11
 frp-manager gre mirror gt11
 
-# ویزارد FRP over GRE Reverse
+# ویزارد FRP over GRE Reverse (اگر iface/subnet/port اشغال باشد خودکار عوض می‌شود)
 frp-manager reverse iran --iran-public 1.2.3.4 --foreign-public 5.6.7.8 \
   [--iface gt11] [--control-port 7025] [--protocol tcp|quic|kcp] [--mss 1220]
 frp-manager reverse foreign --payload /root/mirror.env \
@@ -548,6 +555,8 @@ frp-manager backup export [path]
 frp-manager backup import <path>
 
 frp-manager watchdog enable [--interval 15] [--threshold 3] [--cooldown 60]
+frp-manager watchdog telegram [--token TOKEN] [--chat CHAT_ID] [--api-base URL]
+frp-manager watchdog test-telegram
 frp-manager watchdog disable|status
 
 frp-manager health
@@ -632,6 +641,19 @@ frp-manager watchdog status
 می‌کند. رخدادهای ساختاریافته (`action=… layer=… unit=… reason=… result=…`) در
 `/var/log/frp-panel/watchdog.log` ثبت می‌شوند (در پنل: بخش Watchdog). پیش‌فرض‌ها:
 `15s` / `3` / `60s`.
+
+اعلان تلگرام اختیاری است: اگر `TG_BOT_TOKEN` و `TG_CHAT_ID` تنظیم شده باشند،
+هر رخداد heal (لایه، یونیت، دلیل، تعداد شکست، نتیجه) به تلگرام ارسال می‌شود.
+ارسال در یک subshell پس‌زمینه با `curl --max-time 5` انجام می‌شود و هرگز حلقه‌ی
+واچ‌داگ را متوقف نمی‌کند. روی سرورهایی که تلگرام فیلتر است، `TG_API_BASE` را
+به یک Cloudflare Worker پروکسی بدهید. توکن در پاسخ‌های API ماسک و در بکاپ
+بدون secrets با `REDACTED` جایگزین می‌شود.
+
+```sh
+frp-manager watchdog telegram --token '123456:ABC…' --chat -1001234567890
+frp-manager watchdog telegram --api-base https://tg.example.workers.dev
+frp-manager watchdog test-telegram
+```
 
 ---
 

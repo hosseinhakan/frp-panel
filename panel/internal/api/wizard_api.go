@@ -52,6 +52,7 @@ type wizardGREFRPReq struct {
 	IranPublicIP    string `json:"iranPublicIp"`
 	ForeignPublicIP string `json:"foreignPublicIp"`
 	Iface           string `json:"iface"`
+	Subnet          string `json:"subnet"` // optional 10.100.<n>.0/30; defaults to 10.100.111.0/30
 	ControlPort     int    `json:"controlPort"`
 	Protocol        string `json:"protocol"` // tcp | quic | kcp
 	MSSMode         string `json:"mssMode"`  // optional; default 1220
@@ -105,24 +106,47 @@ func (s *Server) handleWizardGREFRP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// wizardIran creates the entry node: GRE gt11 with 10.100.111.2/30 and an frps
-// instance bound strictly to that tunnel IP. It returns the mirror material for
-// the Foreign node.
+// wizardIran creates the entry node: a GRE tunnel (next free gtNN / 10.100.<n>.0/30
+// by default) and an frps instance bound strictly to that tunnel IP. It
+// returns the mirror material for the Foreign node.
 func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
-	t, err := s.wizardTunnel(req.IranPublicIP, req.ForeignPublicIP, req.Iface,
-		wizardIranPrivate, wizardForeignPrivate, req.MSSMode)
+	iface, octet, autoWarnings, err := s.allocateWizardGRE(req.Iface, req.Subnet,
+		req.IranPublicIP, req.ForeignPublicIP)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "cannot allocate GRE tunnel: %v", err)
+		return
+	}
+	localPriv := fmt.Sprintf("10.100.%d.2/30", octet)
+	remotePriv := fmt.Sprintf("10.100.%d.1/30", octet)
+	serverAddr := fmt.Sprintf("10.100.%d.2", octet)
+
+	t, err := s.wizardTunnel(req.IranPublicIP, req.ForeignPublicIP, iface,
+		localPriv, remotePriv, req.MSSMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
 	}
-	port := req.ControlPort
-	if port == 0 {
-		port = wizardDefaultPort
-	}
-	if port < 1 || port > 65535 {
+	if req.ControlPort != 0 && (req.ControlPort < 1 || req.ControlPort > 65535) {
 		writeErr(w, http.StatusBadRequest, "controlPort must be 1..65535")
 		return
 	}
+
+	// Re-running the wizard for the same pair refreshes the existing frps
+	// instance (same tunnel IP + port) instead of allocating a second one.
+	existingName, existingPort, reuseServer := s.serverForBindAddr(serverAddr)
+	var port int
+	var portWarnings []string
+	if reuseServer {
+		port = existingPort
+	} else {
+		port, portWarnings, err = s.allocateControlPort(req.ControlPort)
+		if err != nil {
+			writeErr(w, http.StatusConflict, "%v", err)
+			return
+		}
+	}
+	autoWarnings = append(autoWarnings, portWarnings...)
+
 	proto, protoName, ok := wizardServerProtocol(req.Protocol)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "protocol must be tcp|quic|kcp")
@@ -137,23 +161,19 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		writeErr(w, http.StatusBadRequest, "invalid serverName %q", name)
 		return
 	}
+	if reuseServer && name != existingName {
+		writeErr(w, http.StatusConflict,
+			"a frps instance for this tunnel IP already exists as %q; use that name or delete it first", existingName)
+		return
+	}
 	path := filepath.Join(s.paths.ServerDir, name+".toml")
-	if _, err := os.Stat(path); err == nil {
+	if _, err := os.Stat(path); err == nil && !reuseServer {
 		writeErr(w, http.StatusConflict, "frps instance %q already exists (%s)", name, path)
-		return
-	}
-	used, err := frpconf.UsedServerPorts(s.paths.ServerDir)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "cannot scan server ports: %v", err)
-		return
-	}
-	if used[port] {
-		writeErr(w, http.StatusConflict, "control port %d is already used by another frps instance", port)
 		return
 	}
 
 	cfg, err := frpconf.NewServerConfig(frpconf.ServerOptions{
-		BindAddr: wizardServerAddr,
+		BindAddr: serverAddr,
 		BindPort: port,
 		Protocol: proto,
 	})
@@ -179,7 +199,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard created frps@%s but enable failed: %s", name, unitErr)
 	}
-	audit("wizard (iran/entry) created %s + %s (%s %s)", t.Name, unit, cfg.BindAddr, port)
+	audit("wizard (iran/entry) created %s + %s (%s %d)", t.Name, unit, cfg.BindAddr, port)
 
 	mp := mirrorParams{
 		Iface:           t.Iface,
@@ -202,9 +222,9 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 
 	resp := map[string]any{
 		"role":     "iran",
-		"topology": wizardTopology,
+		"topology": wizardTopologyFor(t.Iface, cfg.BindAddr),
 		"tunnel":   gres.Tunnel,
-		"warnings": gres.Warnings,
+		"warnings": append(append([]string{}, gres.Warnings...), autoWarnings...),
 		"backup":   gres.Backup,
 		"server": map[string]any{
 			"name": name, "file": path, "bindAddr": cfg.BindAddr, "bindPort": port,
@@ -225,9 +245,9 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// wizardForeign creates the exit node: the mirrored GRE gt11 with
-// 10.100.111.1/30 and an frpc instance dialing the Iran tunnel IP. It then runs
-// the GRE ping + frpc status link test.
+// wizardForeign creates the exit node: the mirrored GRE pair and an frpc
+// instance dialing the Iran tunnel IP. It then runs the GRE ping + frpc
+// status link test.
 func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 	mp, err := resolveMirror(req)
 	if err != nil {
@@ -253,7 +273,16 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
-	t, err := s.wizardTunnel(mp.LocalPublicIP, mp.RemotePublicIP, mp.Iface,
+	if err := s.foreignSubnetConflict(mp.LocalPrivateIP, mp.LocalPublicIP, mp.RemotePublicIP); err != nil {
+		writeErr(w, http.StatusConflict, "%v", err)
+		return
+	}
+	iface, ifaceWarnings, err := s.allocateForeignIface(mp.Iface, mp.LocalPublicIP, mp.RemotePublicIP)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "cannot allocate GRE interface: %v", err)
+		return
+	}
+	t, err := s.wizardTunnel(mp.LocalPublicIP, mp.RemotePublicIP, iface,
 		mp.LocalPrivateIP, mp.RemotePrivateIP, mp.MSSMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
@@ -292,7 +321,15 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 	path := filepath.Join(s.paths.ClientDir, name+".toml")
-	if _, err := os.Stat(path); err == nil {
+	reuseClient := false
+	var oldClient *frpconf.ClientConfig
+	if old, rerr := frpconf.ReadClient(path); rerr == nil {
+		if old.ServerAddr == mp.ServerAddr && old.ServerPort == mp.ControlPort {
+			reuseClient = true
+			oldClient = old
+		}
+	}
+	if _, err := os.Stat(path); err == nil && !reuseClient {
 		writeErr(w, http.StatusConflict, "frpc instance %q already exists (%s)", name, path)
 		return
 	}
@@ -301,18 +338,31 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		writeErr(w, http.StatusInternalServerError, "cannot scan used ports: %v", err)
 		return
 	}
+	// Re-running for the same control link refreshes this client: its own
+	// remote ports must not count as a collision with itself.
+	if reuseClient && oldClient != nil {
+		for _, p := range oldClient.Proxies {
+			delete(used, p.RemotePort)
+		}
+	}
 	if collides := collide(specs, used); collides != "" {
 		writeErr(w, http.StatusConflict, "remote port(s) already in use on this node: %s", collides)
 		return
 	}
 
-	webUsed, err := frpconf.UsedWebServerPorts(s.paths.ClientDir)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "cannot scan webServer ports: %v", err)
-		return
+	var webPort int
+	var webOK bool
+	if reuseClient && oldClient != nil && oldClient.WebServer.Port > 0 {
+		webPort, webOK = oldClient.WebServer.Port, true
+	} else {
+		webUsed, werr := frpconf.UsedWebServerPorts(s.paths.ClientDir)
+		if werr != nil {
+			writeErr(w, http.StatusInternalServerError, "cannot scan webServer ports: %v", werr)
+			return
+		}
+		webPort, webOK = frpconf.AllocatePort(webUsed, frpconf.ClientWebPortLo, frpconf.ClientWebPortHi)
 	}
-	webPort, ok := frpconf.AllocatePort(webUsed, frpconf.ClientWebPortLo, frpconf.ClientWebPortHi)
-	if !ok {
+	if !webOK {
 		writeErr(w, http.StatusConflict, "no free webServer port in %d..%d",
 			frpconf.ClientWebPortLo, frpconf.ClientWebPortHi)
 		return
@@ -362,9 +412,9 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 	}
 	resp := map[string]any{
 		"role":     "foreign",
-		"topology": wizardTopology,
+		"topology": wizardTopologyFor(t.Iface, mp.ServerAddr),
 		"tunnel":   gres.Tunnel,
-		"warnings": gres.Warnings,
+		"warnings": append(append([]string{}, gres.Warnings...), ifaceWarnings...),
 		"backup":   gres.Backup,
 		"client": map[string]any{
 			"name": name, "file": path, "serverAddr": cfg.ServerAddr,
@@ -385,7 +435,9 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-const wizardTopology = "User -> Iran Public IP:<port> -> frps (Iran, 10.100.111.2) -> GRE gt11 -> frpc (Foreign, 10.100.111.1) -> Foreign 127.0.0.1:<port>"
+func wizardTopologyFor(iface, serverAddr string) string {
+	return fmt.Sprintf("User -> Iran Public IP:<port> -> frps (Iran, %s) -> GRE %s -> frpc (Foreign) -> Foreign 127.0.0.1:<port>", serverAddr, iface)
+}
 
 // ---- shared helpers --------------------------------------------------------
 
@@ -647,7 +699,7 @@ func parseMirrorPayload(payload string) (mirrorParams, error) {
 func renderMirrorPayload(m mirrorParams) string {
 	var b strings.Builder
 	b.WriteString("# FRP Tunnel Suite — FRP over GRE Reverse mirror (paste on the FOREIGN / exit node)\n")
-	b.WriteString("# Flow: User -> Iran Public IP:<port> -> frps (Iran) -> GRE gt11 -> frpc (Foreign) -> 127.0.0.1:<port>\n")
+	fmt.Fprintf(&b, "# Flow: User -> Iran Public IP:<port> -> frps (Iran) -> GRE %s -> frpc (Foreign) -> 127.0.0.1:<port>\n", m.Iface)
 	fmt.Fprintf(&b, "IFACE=%s\n", m.Iface)
 	fmt.Fprintf(&b, "LOCAL_PUBLIC_IP=%s\n", m.LocalPublicIP)   // foreign
 	fmt.Fprintf(&b, "REMOTE_PUBLIC_IP=%s\n", m.RemotePublicIP) // iran

@@ -9,7 +9,7 @@
 # New in v2:
 #   - auth.token: generated 32-char random token by default (no static default)
 #   - bindAddr choice incl. private GRE/tunnel IPs (e.g. 10.100.111.2)
-#   - client defaults: tls.enable=true, useEncryption=true, compression=false
+#   - client defaults: tls.enable follows the prompt (TLS 1.3 tunnel), useEncryption=false, compression=false
 #   - dual TCP+UDP forwarding with a single toggle (tcp-<p> + udp-<p> blocks)
 #   - 10) GRE Tunnel Manager (gt11-style, conntrack bypass, MSS clamping)
 #   - 11) Web Panel manager (installs frp-panel as systemd service)
@@ -171,15 +171,15 @@ load_env() {
     [[ -r "$env_file" ]] || { echo "frp-gre: missing env file $env_file" >&2; exit 1; }
 
     LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""
-    MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
+    MTU=""; MSS_MODE="1220"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$env_file"
 
     [[ -n "$LOCAL_PUBLIC_IP" && -n "$REMOTE_PUBLIC_IP" && -n "$IFACE" \
        && -n "$LOCAL_PRIVATE_IP" && -n "$REMOTE_PRIVATE_IP" ]] \
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
-    MTU="${MTU:-1320}"
-    MSS_MODE="${MSS_MODE:-clamp}"
+    MTU="${MTU:-1280}"
+    MSS_MODE="${MSS_MODE:-1220}"
     TXQUEUELEN="${TXQUEUELEN:-1000}"
     [[ "$TXQUEUELEN" =~ ^[0-9]+$ ]] || TXQUEUELEN=1000
 }
@@ -375,6 +375,9 @@ cmd_up() {
     local cur_txq
     cur_txq="$(cat "/sys/class/net/$IFACE/tx_queue_len" 2>/dev/null || echo '')"
     [[ -n "$cur_txq" && "$cur_txq" == "$TXQUEUELEN" ]] || ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
+    # fq keeps the tunnel's egress queue fair under mixed ACK/bulk traffic and
+    # pairs with BBR; harmless (and silently skipped) on kernels without it.
+    tc qdisc replace dev "$IFACE" root fq 2>/dev/null || true
     apply_tuning
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
@@ -1416,11 +1419,11 @@ setup_server() {
         fi
         echo
 
-        echo "transport.heartbeatTimeout = 90"
+        echo "transport.heartbeatTimeout = 25"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = $( [[ $use_mux =~ ^[Yy]$ ]] && echo true || echo false )"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 120"
+        echo "transport.tcpKeepalive = 15"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -1645,11 +1648,11 @@ auth.token = "$auth_token"
 transport.protocol = "$transport"
 transport.tcpMux = $mux
 transport.tcpMuxKeepaliveInterval = 10
-transport.dialServerTimeout = 10
-transport.dialServerKeepalive = 120
-transport.poolCount = 20
-transport.heartbeatInterval = 30
-transport.heartbeatTimeout = 90
+transport.dialServerTimeout = 5
+transport.dialServerKeepalive = 15
+transport.poolCount = 40
+transport.heartbeatInterval = 10
+transport.heartbeatTimeout = 25
 transport.tls.enable = $tls_enabled
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
@@ -1695,11 +1698,11 @@ EOF
             echo "transport.protocol = \"$transport\""
             echo "transport.tcpMux = $mux"
             echo "transport.tcpMuxKeepaliveInterval = 10"
-            echo "transport.dialServerTimeout = 10"
-            echo "transport.dialServerKeepalive = 120"
-            echo "transport.poolCount = 20"
-            echo "transport.heartbeatInterval = 30"
-            echo "transport.heartbeatTimeout = 90"
+            echo "transport.dialServerTimeout = 5"
+            echo "transport.dialServerKeepalive = 15"
+            echo "transport.poolCount = 40"
+            echo "transport.heartbeatInterval = 10"
+            echo "transport.heartbeatTimeout = 25"
             echo "transport.tls.enable = $tls_enabled"
             echo "transport.quic.keepalivePeriod = 10"
             echo "transport.quic.maxIdleTimeout = 30"
@@ -2241,20 +2244,20 @@ gre_create_prompt() {
     lpriv=${lpriv:-"10.100.111.1/30"}
     read -p "Remote private IP [10.100.111.2/30]: " rpriv
     rpriv=${rpriv:-"10.100.111.2/30"}
-    read -p "MTU [1320]: " mtu
-    mtu=${mtu:-1320}
+    read -p "MTU [1280]: " mtu
+    mtu=${mtu:-1280}
     read -p "TX queue length (txqueuelen) [1000]: " txq
     txq=${txq:-1000}
     echo "TCP MSS clamping mode:"
-    echo "  1) clamp  (auto, recommended)"
+    echo "  1) 1220    (paranoid, recommended for GRE)"
     echo "  2) 1360    (explicit)"
     echo "  3) 1240"
-    echo "  4) 1220    (paranoid, for heavily filtered paths)"
+    echo "  4) clamp   (auto)"
     echo "  5) off"
     read -p "Choice [1]: " mss_choice
     case "$mss_choice" in
-        2) mss="1360" ;; 3) mss="1240" ;; 4) mss="1220" ;; 5) mss="off" ;; 1|"") mss="clamp" ;;
-        *) mss="clamp" ;;
+        2) mss="1360" ;; 3) mss="1240" ;; 4) mss="clamp" ;; 5) mss="off" ;; 1|"") mss="1220" ;;
+        *) mss="1220" ;;
     esac
     gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" "$txq"
 }
@@ -2295,7 +2298,7 @@ gre_mirror_print() {
         print_error "No tunnel named '$name' ($GRE_DIR/$name.env missing)."
         return 1
     fi
-    LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""; MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
+    LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""; MTU=""; MSS_MODE="1220"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$GRE_DIR/$name.env"
     cat <<EOF
@@ -2307,8 +2310,8 @@ frp-manager gre create \\
   --iface "$IFACE" \\
   --local-private "$REMOTE_PRIVATE_IP" \\
   --remote-private "$LOCAL_PRIVATE_IP" \\
-  --mtu "${MTU:-1320}" \\
-  --mss "${MSS_MODE:-clamp}" \\
+  --mtu "${MTU:-1280}" \\
+  --mss "${MSS_MODE:-1220}" \\
   --txqueuelen "${TXQUEUELEN:-1000}"
 
 # Equivalent env file ($GRE_DIR/$IFACE.env):
@@ -2317,8 +2320,8 @@ REMOTE_PUBLIC_IP=$LOCAL_PUBLIC_IP
 IFACE=$IFACE
 LOCAL_PRIVATE_IP=$REMOTE_PRIVATE_IP
 REMOTE_PRIVATE_IP=$LOCAL_PRIVATE_IP
-MTU=${MTU:-1320}
-MSS_MODE=${MSS_MODE:-clamp}
+MTU=${MTU:-1280}
+MSS_MODE=${MSS_MODE:-1220}
 TXQUEUELEN=${TXQUEUELEN:-1000}
 EOF
 }
@@ -2344,6 +2347,7 @@ TXQUEUELEN=${12:-1000}
 SERVER_ADDR=$8
 CONTROL_PORT=$9
 PROTOCOL=${10}
+TLS_ENABLE=${13:-false}
 TOKEN=${11}
 EOF
 }
@@ -2362,6 +2366,7 @@ frp-manager reverse foreign \\
   --server-addr "$8" \\
   --control-port "$9" \\
   --protocol "${10}" \\
+  --encrypt-tls "${13:-false}" \\
   --token "${11}" \\
   --ports 8443,2053,443
 EOF
@@ -2371,7 +2376,7 @@ reverse_parse_payload() { # file-or-stdin; sets RP_* globals
     local src="$1" line key val
     RP_IFACE=""; RP_LOCAL_PUBLIC_IP=""; RP_REMOTE_PUBLIC_IP=""; RP_LOCAL_PRIVATE_IP=""
     RP_REMOTE_PRIVATE_IP=""; RP_MTU=""; RP_MSS_MODE=""; RP_TXQUEUELEN=""; RP_SERVER_ADDR=""
-    RP_CONTROL_PORT=""; RP_PROTOCOL=""; RP_TOKEN=""
+    RP_CONTROL_PORT=""; RP_PROTOCOL=""; RP_TOKEN=""; RP_TLS_ENABLE=""
     [[ "$src" == "-" ]] && src="/dev/stdin"
     if [[ ! -r "$src" ]]; then
         print_error "cannot read mirror payload: $src"
@@ -2397,6 +2402,7 @@ reverse_parse_payload() { # file-or-stdin; sets RP_* globals
             SERVER_ADDR) RP_SERVER_ADDR="$val" ;;
             CONTROL_PORT) RP_CONTROL_PORT="$val" ;;
             PROTOCOL) RP_PROTOCOL="$val" ;;
+            TLS_ENABLE) RP_TLS_ENABLE="$val" ;;
             TOKEN) RP_TOKEN="$val" ;;
         esac
     done < "$src"
@@ -2633,9 +2639,9 @@ reverse_port_busy() { # reverse_port_busy <port>
     return 1
 }
 
-# reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS] [TXQUEUELEN]
+# reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS] [TXQUEUELEN] [TLS]
 reverse_iran_do() {
-    local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}" txq="${7:-1000}"
+    local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}" txq="${7:-1000}" tls="${8:-false}"
     if [[ ! -x /usr/local/bin/frps ]]; then
         print_error "frps is not installed — run menu 1 (Install FRP) first."
         return 1
@@ -2689,7 +2695,7 @@ reverse_iran_do() {
     fi
 
     print_info "Creating GRE $iface: Iran $iran (10.100.$req_octet.2/30) ↔ Foreign $foreign (10.100.$req_octet.1/30)"
-    gre_create_do "$iran" "$foreign" "$iface" "10.100.$req_octet.2/30" "10.100.$req_octet.1/30" 1320 "$mss" "$txq" || return 1
+    gre_create_do "$iran" "$foreign" "$iface" "10.100.$req_octet.2/30" "10.100.$req_octet.1/30" 1280 "$mss" "$txq" || return 1
 
     local token cfg tmp server_addr
     server_addr="10.100.$req_octet.2"
@@ -2726,11 +2732,14 @@ reverse_iran_do() {
             echo "# transport.quic.maxIncomingStreams = 100000"
         fi
         echo
-        echo "transport.heartbeatTimeout = 90"
+        echo "transport.heartbeatTimeout = 25"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 120"
+        echo "transport.tcpKeepalive = 15"
+        if [[ "$tls" == "true" ]]; then
+            echo "transport.tls.force = true"
+        fi
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -2757,19 +2766,19 @@ reverse_iran_do() {
     reverse_print_flow
     echo
     print_info "Mirror payload — paste this on the Foreign node:"
-    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq"
+    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1280 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq" "$tls"
     echo
     print_info "Or run this on the Foreign node (add the ports it should expose):"
-    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq"
+    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1280 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq" "$tls"
     echo
     print_warning "Token (the Foreign frpc must use the same): $token"
 }
 
-# reverse_foreign_do LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT TOKEN PORTS PROTOCOL PROTO_MODE [LOCALIP]
+# reverse_foreign_do LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT TOKEN PORTS PROTOCOL PROTO_MODE [LOCALIP] [TXQUEUELEN] [TLS]
 reverse_foreign_do() {
     local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7"
     local server_addr="$8" port="$9" token="${10}" ports="${11}" protoname="${12}"
-    local proto_mode="${13:-both}" localip="${14:-127.0.0.1}" txq="${15:-1000}"
+    local proto_mode="${13:-both}" localip="${14:-127.0.0.1}" txq="${15:-1000}" tls="${16:-false}"
     if [[ ! -x /usr/local/bin/frpc ]]; then
         print_error "frpc is not installed — run menu 1 (Install FRP) first."
         return 1
@@ -2851,12 +2860,12 @@ reverse_foreign_do() {
         echo "transport.protocol = \"$protoname\""
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.dialServerTimeout = 10"
-        echo "transport.dialServerKeepalive = 120"
-        echo "transport.poolCount = 20"
-        echo "transport.heartbeatInterval = 30"
-        echo "transport.heartbeatTimeout = 90"
-        echo "transport.tls.enable = false"
+        echo "transport.dialServerTimeout = 5"
+        echo "transport.dialServerKeepalive = 15"
+        echo "transport.poolCount = 40"
+        echo "transport.heartbeatInterval = 10"
+        echo "transport.heartbeatTimeout = 25"
+        echo "transport.tls.enable = $tls"
         echo "transport.quic.keepalivePeriod = 10"
         echo "transport.quic.maxIdleTimeout = 30"
         echo "transport.quic.maxIncomingStreams = 100000"
@@ -2949,12 +2958,16 @@ reverse_iran_prompt() {
     read -p "Choice [1]: " proto_choice
     case "$proto_choice" in 2) proto="quic" ;; 3) proto="kcp" ;; *) proto="tcp" ;; esac
     mss="1220"
-    reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss"
+    local use_tls tls
+    read -p "Encrypt tunnel (TLS 1.3) (y/n) [n]: " use_tls
+    use_tls=${use_tls:-n}
+    tls=$([[ $use_tls =~ ^[Yy]$ ]] && echo true || echo false)
+    reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss" "1000" "$tls"
 }
 
 reverse_foreign_prompt() {
     local def_pub lp rp port token protoname proto_mode ports localip payload_choice payload_file
-    local iface lpriv rpriv mtu mss server_addr txq
+    local iface lpriv rpriv mtu mss server_addr txq tls
     echo "Do you have a mirror payload from the Iran node?"
     echo "  1) Yes — read it from a file"
     echo "  2) No — enter the values manually"
@@ -2964,9 +2977,9 @@ reverse_foreign_prompt() {
         reverse_parse_payload "$payload_file" || return 1
         lp="$RP_LOCAL_PUBLIC_IP"; rp="$RP_REMOTE_PUBLIC_IP"
         iface="${RP_IFACE:-gt11}"; lpriv="${RP_LOCAL_PRIVATE_IP:-10.100.111.1/30}"
-        rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"; mtu="${RP_MTU:-1320}"
+        rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"; mtu="${RP_MTU:-1280}"
         mss="${RP_MSS_MODE:-1220}"; server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
-        txq="${RP_TXQUEUELEN:-1000}"
+        txq="${RP_TXQUEUELEN:-1000}"; tls="${RP_TLS_ENABLE:-false}"
         port="${RP_CONTROL_PORT:-7025}"; token="$RP_TOKEN"; protoname="${RP_PROTOCOL:-tcp}"
     else
         def_pub=$(detect_public_ip)
@@ -2974,13 +2987,17 @@ reverse_foreign_prompt() {
         lp=${lp:-$def_pub}
         read -p "Iran public IP: " rp
         iface="$(reverse_next_iface)"; lpriv="10.100.111.1/30"; rpriv="10.100.111.2/30"
-        mtu="1320"; mss="1220"; server_addr="10.100.111.2"; txq="1000"
+        mtu="1280"; mss="1220"; server_addr="10.100.111.2"; txq="1000"; tls="false"
         read -p "Tunnel control port [7025]: " port
         port=${port:-7025}
         read -p "Auth token (from the Iran node): " token
         echo "FRP protocol: 1) tcp  2) quic  3) kcp"
         read -p "Choice [1]: " proto_choice
         case "$proto_choice" in 2) protoname="quic" ;; 3) protoname="kcp" ;; *) protoname="tcp" ;; esac
+        local use_tls
+        read -p "Encrypt tunnel (TLS 1.3) (y/n) [n]: " use_tls
+        use_tls=${use_tls:-n}
+        tls=$([[ $use_tls =~ ^[Yy]$ ]] && echo true || echo false)
     fi
     read -p "Local ports to expose (e.g. 8443,2053,443): " ports
     echo "Emit per port: 1) TCP + UDP  2) TCP only  3) UDP only"
@@ -2989,7 +3006,7 @@ reverse_foreign_prompt() {
     read -p "Local IP on this node [127.0.0.1]: " localip
     localip=${localip:-127.0.0.1}
     reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
-        "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq"
+        "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq" "$tls"
 }
 
 reverse_menu() {
@@ -3025,7 +3042,7 @@ reverse_cli() {
     shift || true
     case "$action" in
         iran)
-            local iran="" foreign="" iface="gt11" port="7025" proto="tcp" mss="1220" txq="1000"
+            local iran="" foreign="" iface="gt11" port="7025" proto="tcp" mss="1220" txq="1000" tls="false"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --iran-public) iran="$2"; shift 2 ;;
@@ -3035,14 +3052,16 @@ reverse_cli() {
                     --protocol) proto="$2"; shift 2 ;;
                     --mss) mss="$2"; shift 2 ;;
                     --txqueuelen) txq="$2"; shift 2 ;;
+                    --encrypt-tls|--tls) tls="$2"; shift 2 ;;
                     --no-watchdog) REVERSE_NO_WATCHDOG=1; shift ;;
                     *) print_error "unknown flag: $1"; exit 1 ;;
                 esac
             done
-            reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss" "$txq"
+            case "$tls" in true|false) ;; *) print_error "--encrypt-tls must be true|false"; exit 1 ;; esac
+            reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss" "$txq" "$tls"
             ;;
         foreign)
-            local payload="" lp="" rp="" iface="" lpriv="" rpriv="" mtu="" mss="" txq=""
+            local payload="" lp="" rp="" iface="" lpriv="" rpriv="" mtu="" mss="" txq="" tls=""
             local server_addr="" port="" token="" ports="" protoname="" proto_mode="both" localip="127.0.0.1"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -3055,6 +3074,7 @@ reverse_cli() {
                     --mtu) mtu="$2"; shift 2 ;;
                     --mss) mss="$2"; shift 2 ;;
                     --txqueuelen) txq="$2"; shift 2 ;;
+                    --encrypt-tls|--tls) tls="$2"; shift 2 ;;
                     --server-addr) server_addr="$2"; shift 2 ;;
                     --control-port|--port) port="$2"; shift 2 ;;
                     --token) token="$2"; shift 2 ;;
@@ -3073,9 +3093,10 @@ reverse_cli() {
                 [[ -z "$iface" ]] && iface="${RP_IFACE:-gt11}"
                 [[ -z "$lpriv" ]] && lpriv="${RP_LOCAL_PRIVATE_IP:-10.100.111.1/30}"
                 [[ -z "$rpriv" ]] && rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"
-                [[ -z "$mtu" ]] && mtu="${RP_MTU:-1320}"
+                [[ -z "$mtu" ]] && mtu="${RP_MTU:-1280}"
                 [[ -z "$mss" ]] && mss="${RP_MSS_MODE:-1220}"
                 [[ -z "$txq" ]] && txq="${RP_TXQUEUELEN:-1000}"
+                [[ -z "$tls" ]] && tls="${RP_TLS_ENABLE:-false}"
                 [[ -z "$server_addr" ]] && server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
                 [[ -z "$port" ]] && port="${RP_CONTROL_PORT:-7025}"
                 [[ -z "$token" ]] && token="$RP_TOKEN"
@@ -3084,9 +3105,10 @@ reverse_cli() {
             [[ -z "$iface" ]] && iface="gt11"
             [[ -z "$lpriv" ]] && lpriv="10.100.111.1/30"
             [[ -z "$rpriv" ]] && rpriv="10.100.111.2/30"
-            [[ -z "$mtu" ]] && mtu="1320"
+            [[ -z "$mtu" ]] && mtu="1280"
             [[ -z "$mss" ]] && mss="1220"
             [[ -z "$txq" ]] && txq="1000"
+            [[ -z "$tls" ]] && tls="false"
             [[ -z "$server_addr" ]] && server_addr="10.100.111.2"
             [[ -z "$port" ]] && port="7025"
             [[ -z "$protoname" ]] && protoname="tcp"
@@ -3094,8 +3116,9 @@ reverse_cli() {
                 print_error "usage: frp-manager reverse foreign ... --ports 8443,2053,443"
                 exit 1
             fi
+            case "$tls" in true|false) ;; *) print_error "--encrypt-tls must be true|false"; exit 1 ;; esac
             reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
-                "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq"
+                "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq" "$tls"
             ;;
         *)
             print_error "usage: frp-manager reverse iran|foreign ..."
@@ -3806,19 +3829,22 @@ Subcommands (non-interactive):
   frp-manager gre list
   frp-manager gre create --local-public IP --remote-public IP
                           [--iface gt11] [--local-private 10.100.111.1/30]
-                          [--remote-private 10.100.111.2/30] [--mtu 1320]
+                          [--remote-private 10.100.111.2/30] [--mtu 1280]
                           [--mss clamp|1360|1240|1220|off] [--txqueuelen 1000]
   frp-manager gre delete <name>
   frp-manager gre mirror <name>
   frp-manager reverse iran --iran-public IP --foreign-public IP
                            [--iface gt11] [--control-port 7025]
-                           [--protocol tcp|quic|kcp] [--mss 1220] [--txqueuelen 1000] [--no-watchdog]
+                           [--protocol tcp|quic|kcp] [--mss 1220] [--txqueuelen 1000]
+                           [--encrypt-tls true|false] [--no-watchdog]
                            (busy iface/subnet/port auto-allocate the next free value)
   frp-manager reverse foreign --payload FILE|- --ports 8443,2053,443
-                           [--proto both|tcp|udp] [--local-ip 127.0.0.1] [--no-watchdog]
+                           [--proto both|tcp|udp] [--local-ip 127.0.0.1]
+                           [--encrypt-tls true|false] [--no-watchdog]
   frp-manager reverse foreign --local-public IP --remote-public IP
                            --control-port 7025 --token TOKEN
-                           --ports 8443,2053,443 [--protocol tcp] [--no-watchdog]
+                           --ports 8443,2053,443 [--protocol tcp]
+                           [--encrypt-tls true|false] [--no-watchdog]
   frp-manager panel install [--file <tar.gz>] [--port N]
   frp-manager panel start|stop|restart|status
   frp-manager panel port <N>
@@ -3873,7 +3899,7 @@ gre_cli() {
     case "$action" in
         list) gre_list ;;
         create)
-            local lp="" rp="" iface="gt11" lpriv="10.100.111.1/30" rpriv="10.100.111.2/30" mtu="1320" mss="clamp" txq="1000"
+            local lp="" rp="" iface="gt11" lpriv="10.100.111.1/30" rpriv="10.100.111.2/30" mtu="1280" mss="1220" txq="1000"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --local-public) lp="$2"; shift 2 ;;

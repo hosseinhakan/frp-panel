@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.8 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.9 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
@@ -68,7 +68,7 @@ IP**, at the same forwarded port.
    **Iran Node**. The form is pre-filled with the next free interface,
    `/30` subnet and control port (`gt11` / `10.100.111.0/30` / `7025` on a
    fresh host). The wizard creates:
-   - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1320`,
+   - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1280`,
      `txqueuelen 1000`, `NOTRACK` for proto 47 and TCPMSS clamping (local SYN
      MSS pinned to `1220` so PMTUD black holes cannot stall the control
      channel), plus a persisted zero-drop `sysctl.d` profile (BBR + fq, 16 MB
@@ -98,12 +98,14 @@ IP**, at the same forwarded port.
    (`8989,8443,6000-6005`) plus the TCP / TCP+UDP selector. Either path creates
    the mirrored GRE tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed
    without touching the mirrored `/30`) and an `frpc` instance. Generated
-   configs use the proven `mikeesierrah` profile: `tls.enable = false`,
-   per-proxy `useEncryption = false`, compression off, compact
-   `parseNumberRangePair` port templates, `dial 10s / keepalive 30s / pool 15`
-   and `heartbeat 15s / timeout 45s`. It then pings the Iran tunnel IP and
-   reports the frpc unit state, and allocates the loopback metrics `webServer`
-   port the watchdog uses for proxy health.
+   configs default to the zero-stall profile: `tls.enable = false` unless
+   **Encrypt Tunnel (TLS 1.3)** is selected (which also forces
+   `transport.tls.force = true` on the Iran `frps` and propagates through the
+   mirror payload as `TLS_ENABLE`), per-proxy `useEncryption = false`,
+   compression off, compact `parseNumberRangePair` port templates,
+   `dial 5s / keepalive 15s / pool 40` and `heartbeat 10s / timeout 25s`. It
+   then pings the Iran tunnel IP and reports the frpc unit state, and allocates
+   the loopback metrics `webServer` port the watchdog uses for proxy health.
 3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
    `1.2.3.4:443`).
 
@@ -145,14 +147,15 @@ Single-node usage works the same way — skip GRE and bind frps to `::`
 
 ### Config profile and maintenance
 
-Generated configs follow the proven `mikeesierrah/frp-script` profile with
-stability-tuned timers: frps `heartbeatTimeout=45`, `tcpKeepalive=30`,
+Generated configs follow the `mikeesierrah/frp-script` layout with the v1.2.9
+zero-stall timers: frps `heartbeatTimeout=25`, `tcpKeepalive=15`,
 `maxPoolCount=65535`, `tcpMux=false`, and `proxyBindAddr=0.0.0.0` whenever
-`bindAddr` is a GRE IP; frpc `tls.enable=false`, per-proxy
-encryption/compression off, `dial 10/30`, `poolCount=15`, `heartbeat 15/45`,
-and compact `parseNumberRangePair` port templates. The Edit modal exposes every
-one of these fields (plus the QUIC block) and keeps both template and plain
-`[[proxies]]` configs editable.
+`bindAddr` is a GRE IP; frpc `tls.enable` follows the **Encrypt Tunnel (TLS
+1.3)** toggle (off by default), per-proxy encryption/compression off,
+`dial 5/15`, `poolCount=40`, `heartbeat 10/25`, and compact
+`parseNumberRangePair` port templates. The Edit modal exposes every one of
+these fields (plus the QUIC block and `transport.tls.force`) and keeps both
+template and plain `[[proxies]]` configs editable.
 
 The **Turbo** tab adds three one-click maintenance actions (also
 `frp-manager turbo …`):

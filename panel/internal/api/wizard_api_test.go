@@ -40,7 +40,7 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	if tunnel["local_private_ip"] != "10.100.111.2/30" || tunnel["remote_private_ip"] != "10.100.111.1/30" {
 		t.Errorf("entry private pair = %v/%v", tunnel["local_private_ip"], tunnel["remote_private_ip"])
 	}
-	if tunnel["mtu"] != float64(1320) {
+	if tunnel["mtu"] != float64(1280) {
 		t.Errorf("mtu = %v", tunnel["mtu"])
 	}
 	if tunnel["mss_mode"] != "1220" {
@@ -258,11 +258,11 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		`parseNumberRangePair "443,2053" "443,2053"`,
 		`localPort = {{ $v.First }}`,
 		`remotePort = {{ $v.Second }}`,
-		`transport.dialServerTimeout = 10`,
-		`transport.dialServerKeepalive = 120`,
-		`transport.poolCount = 20`,
-		`transport.heartbeatInterval = 30`,
-		`transport.heartbeatTimeout = 90`,
+		`transport.dialServerTimeout = 5`,
+		`transport.dialServerKeepalive = 15`,
+		`transport.poolCount = 40`,
+		`transport.heartbeatInterval = 10`,
+		`transport.heartbeatTimeout = 25`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("frpc config missing %q:\n%s", want, raw)
@@ -278,6 +278,68 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 	}
 	if rtt, _ := link["rtt_ms"].(float64); rtt != 12.433 {
 		t.Errorf("rtt_ms = %v", link["rtt_ms"])
+	}
+}
+
+func TestWizardEncryptTLSParity(t *testing.T) {
+	e := newTestEnv(t)
+	e.runner.active["gre-tunnel@gt11"] = "active"
+	e.runner.active["frps@server-7025"] = "active"
+	e.runner.active["frpc@client-7025"] = "active"
+	e.runner.execOut["ping -c 3 -W 2 -I gt11 10.100.111.2"] = wizardPingOut
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","encrypt_tls":true}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+
+	raw, err := os.ReadFile(filepath.Join(e.srv.paths.ServerDir, "server-7025.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "transport.tls.force = true") {
+		t.Errorf("frps config missing transport.tls.force = true:\n%s", raw)
+	}
+	payload, _ := resp["mirror_payload"].(string)
+	if !strings.Contains(payload, "TLS_ENABLE=true") {
+		t.Errorf("mirror payload missing TLS_ENABLE=true:\n%s", payload)
+	}
+	foreignScript, _ := resp["foreign_script"].(string)
+	if !strings.Contains(foreignScript, "TLS_ENABLE='true'") ||
+		!strings.Contains(foreignScript, "transport.tls.enable = true") {
+		t.Errorf("foreign script does not enable TLS:\n%s", foreignScript)
+	}
+
+	// The Foreign node must reproduce the Iran TLS mode from the payload alone.
+	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) + `,"localPorts":"8443","proto":"tcp"}`
+	rec = e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("foreign from payload = %d: %s", rec.Code, rec.Body.String())
+	}
+	client, _ := jsonMap(t, rec)["client"].(map[string]any)
+	if client["tls"] != true {
+		t.Errorf("foreign client tls = %v, want true", client["tls"])
+	}
+	craw, err := os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7025.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(craw), "transport.tls.enable = true") {
+		t.Errorf("frpc config not TLS-enabled:\n%s", craw)
+	}
+
+	// An explicit encrypt_tls=false override must win over the mirrored mode.
+	body = `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) +
+		`,"localPorts":"8443","proto":"tcp","encrypt_tls":false}`
+	rec = e.authorized(http.MethodPost, "/api/wizard/gre-frp", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("foreign override = %d: %s", rec.Code, rec.Body.String())
+	}
+	craw, _ = os.ReadFile(filepath.Join(e.srv.paths.ClientDir, "client-7025.toml"))
+	if !strings.Contains(string(craw), "transport.tls.enable = false") {
+		t.Errorf("explicit encrypt_tls=false not honored:\n%s", craw)
 	}
 }
 

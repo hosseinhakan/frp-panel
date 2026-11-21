@@ -792,6 +792,7 @@ document.addEventListener("alpine:init", () => {
         clientName: "",
         token: "",
         rawSpeed: true,
+        encryptTls: false,
         foreignPorts: "8989",
         foreignProto: "tcp",
         foreignRawSpeed: true,
@@ -830,6 +831,19 @@ document.addEventListener("alpine:init", () => {
       if (role === "iran") this.loadRevDefaults();
     },
 
+    // The mirror payload is the source of truth for the Foreign TLS mode: a
+    // TLS-forced Iran frps cannot accept a plain frpc.
+    revTLSFromPayload(text) {
+      const m = /^\s*TLS_ENABLE\s*=\s*(true|false)\s*$/im.exec(String(text || ""));
+      return m ? m[1].toLowerCase() === "true" : null;
+    },
+
+    revSyncTLS() {
+      if (!this.rev) return;
+      const v = this.revTLSFromPayload(this.rev.mirrorPayload);
+      if (v !== null) this.rev.encryptTls = v;
+    },
+
     async revRun() {
       const r = this.rev;
       if (!r) return;
@@ -847,9 +861,11 @@ document.addEventListener("alpine:init", () => {
           protocol: r.protocol,
           bindAddr: r.bindAddr,
           token: r.token.trim(),
+          encrypt_tls: !!r.encryptTls,
           enableWatchdog: !!r.enableWatchdog,
         };
       } else {
+        this.revSyncTLS();
         // With a payload, only send fields the user actually filled in —
         // otherwise UI defaults would override the pasted tunnel params.
         body = {
@@ -860,6 +876,7 @@ document.addEventListener("alpine:init", () => {
           localIp: r.localIp.trim(),
           clientName: r.clientName.trim(),
           rawSpeed: !!r.rawSpeed,
+          encrypt_tls: !!r.encryptTls,
           enableWatchdog: !!r.enableWatchdog,
         };
         if (r.foreignPublicIp.trim()) body.foreignPublicIp = r.foreignPublicIp.trim();
@@ -903,6 +920,7 @@ document.addEventListener("alpine:init", () => {
               proto: r.foreignProto,
               localIp: "127.0.0.1",
               rawSpeed: !!r.foreignRawSpeed,
+              encrypt_tls: !!r.encryptTls,
             },
           }
         );
@@ -983,6 +1001,7 @@ document.addEventListener("alpine:init", () => {
         bindAddr: "::",
         protocol: "quic",
         tcpMux: false,
+        tlsForce: false,
         token: FRP.genToken(),
         genToken: true,
         webEnabled: true,
@@ -1005,6 +1024,7 @@ document.addEventListener("alpine:init", () => {
             bindAddr: w.bindAddr.trim(),
             protocol: w.protocol,
             tcpMux: w.tcpMux,
+            tlsForce: !!w.tlsForce,
             token: w.genToken ? w.token : "",
             webEnabled: w.webEnabled,
           },
@@ -1059,9 +1079,10 @@ document.addEventListener("alpine:init", () => {
           protocol: c.protocol === "tcp" ? "none" : c.protocol || "quic",
           token: d.token || "",
           tcpMux: !!c.tcpMux,
+          tlsForce: !!c.tlsForce,
           tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
-          heartbeatTimeout: c.heartbeatTimeout || 45,
-          tcpKeepalive: c.tcpKeepalive || 30,
+          heartbeatTimeout: c.heartbeatTimeout || 25,
+          tcpKeepalive: c.tcpKeepalive || 15,
           maxPoolCount: c.maxPoolCount || 65535,
           quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
           quicMaxIdleTimeout: c.quicMaxIdleTimeout || 30,
@@ -1089,9 +1110,10 @@ document.addEventListener("alpine:init", () => {
             proxyBindAddr: (e.proxyBindAddr || "").trim(),
             protocol: e.protocol,
             tcpMux: e.tcpMux,
+            tlsForce: !!e.tlsForce,
             tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
-            heartbeatTimeout: Number(e.heartbeatTimeout) || 45,
-            tcpKeepalive: Number(e.tcpKeepalive) || 30,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 25,
+            tcpKeepalive: Number(e.tcpKeepalive) || 15,
             maxPoolCount: Number(e.maxPoolCount) || 65535,
             quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
             quicMaxIdleTimeout: Number(e.quicMaxIdleTimeout) || 30,
@@ -1138,7 +1160,7 @@ document.addEventListener("alpine:init", () => {
       const dflt = this.wizDefaults || {};
       // The linked tunnel carries the zero-drop profile; show exactly what the
       // generated script will write so the Foreign node cannot drift.
-      const mtu = linked && linked.mtu ? linked.mtu : 1320;
+      const mtu = linked && linked.mtu ? linked.mtu : 1280;
       const mssMode = linked && linked.mss_mode ? linked.mss_mode : "1220";
       const txqueuelen = linked && linked.txqueuelen ? linked.txqueuelen : 1000;
       const bindAddr = String(row.bindAddr || "");
@@ -1166,6 +1188,7 @@ document.addEventListener("alpine:init", () => {
         proxyBindAddr: effectiveProxy,
         proxyBindOk,
         rawSpeed: true,
+        encryptTls: !!row.tlsForce,
         busy: false,
         error: "",
         result: null,
@@ -1193,6 +1216,7 @@ document.addEventListener("alpine:init", () => {
               proto: f.proto,
               localIp: f.localIp.trim(),
               rawSpeed: !!f.rawSpeed,
+              encrypt_tls: !!f.encryptTls,
             },
           }
         );
@@ -1371,12 +1395,10 @@ document.addEventListener("alpine:init", () => {
       const v = target === "wiz" ? this.wiz : this.edit;
       if (!v) return;
       if (v.rawSpeed) {
-        v.useTls = false;
         v.useEncryption = false;
         v.useCompression = false;
         v.tcpMux = false;
       } else {
-        v.useTls = true;
         v.useEncryption = true;
       }
     },
@@ -1526,18 +1548,18 @@ document.addEventListener("alpine:init", () => {
           useCompression: first.useCompression === true,
           tcpMux: c.tcpMux !== undefined ? !!c.tcpMux : !!row.tcpMux,
           tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
-          dialServerTimeout: c.dialServerTimeout || 10,
-          dialServerKeepalive: c.dialServerKeepalive || 30,
-          poolCount: c.poolCount || 15,
-          heartbeatInterval: c.heartbeatInterval || 15,
-          heartbeatTimeout: c.heartbeatTimeout || 45,
+          dialServerTimeout: c.dialServerTimeout || 5,
+          dialServerKeepalive: c.dialServerKeepalive || 15,
+          poolCount: c.poolCount || 40,
+          heartbeatInterval: c.heartbeatInterval || 10,
+          heartbeatTimeout: c.heartbeatTimeout || 25,
           quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
           quicMaxIdleTimeout: c.quicMaxIdleTimeout || 30,
           quicMaxIncomingStreams: c.quicMaxIncomingStreams || 100000,
           loginFailExit: !!c.loginFailExit,
           rangeTemplate: !!c.rangeTemplate,
           restart: !!(d.unit && d.unit.active === "active"),
-          rawSpeed: !tls && !enc,
+          rawSpeed: !enc,
           busy: false,
           error: "",
         };
@@ -1563,11 +1585,11 @@ document.addEventListener("alpine:init", () => {
             useCompression: e.useCompression,
             tcpMux: e.tcpMux,
             tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
-            dialServerTimeout: Number(e.dialServerTimeout) || 10,
-            dialServerKeepalive: Number(e.dialServerKeepalive) || 30,
-            poolCount: Number(e.poolCount) || 15,
-            heartbeatInterval: Number(e.heartbeatInterval) || 15,
-            heartbeatTimeout: Number(e.heartbeatTimeout) || 45,
+            dialServerTimeout: Number(e.dialServerTimeout) || 5,
+            dialServerKeepalive: Number(e.dialServerKeepalive) || 15,
+            poolCount: Number(e.poolCount) || 40,
+            heartbeatInterval: Number(e.heartbeatInterval) || 10,
+            heartbeatTimeout: Number(e.heartbeatTimeout) || 25,
             quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
             quicMaxIdleTimeout: Number(e.quicMaxIdleTimeout) || 30,
             quicMaxIncomingStreams: Number(e.quicMaxIncomingStreams) || 100000,
@@ -1686,7 +1708,7 @@ document.addEventListener("alpine:init", () => {
         remotePublicIp: "",
         localPrivateIp: "",
         remotePrivateIp: "",
-        mtu: 1320,
+        mtu: 1280,
         mssMode: "clamp",
         txqueuelen: 1000,
         restart: true,
@@ -1704,7 +1726,7 @@ document.addEventListener("alpine:init", () => {
         remotePublicIp: t.remote_public_ip || "",
         localPrivateIp: t.local_private_ip || "",
         remotePrivateIp: t.remote_private_ip || "",
-        mtu: t.mtu || 1320,
+        mtu: t.mtu || 1280,
         mssMode: t.mss_mode || "clamp",
         txqueuelen: t.txqueuelen || 1000,
         restart: true,

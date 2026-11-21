@@ -35,6 +35,7 @@ type ServerOptions struct {
 	ProxyBindAddr string // "" = derive from BindAddr (0.0.0.0 for a private/GRE IP)
 	Protocol      Protocol
 	TCPMux        bool
+	TLSForce      bool   // require TLS 1.3 on the control connection
 	Token         string // generated when empty
 	WebAddr       string // default "127.0.0.1" when WebPort > 0
 	WebPort       int    // 0 disables the webServer block
@@ -86,14 +87,15 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	// Exact mikeesierrah profile: a 90s heartbeat timeout pairs with frpc's
-	// 30s interval (3 missed heartbeats), and the 120s TCP keepalive avoids
-	// DPI/stateful-firewall idle drops on long-haul links.
-	c.Transport.HeartbeatTimeout = 90
+	// Zero-stall profile: a short 25s heartbeat timeout pairs with frpc's
+	// 10s interval, and a 15s TCP keepalive keeps the control connection
+	// warm through DPI/stateful firewalls without flooding the GRE link.
+	c.Transport.HeartbeatTimeout = 25
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 120
+	c.Transport.TCPKeepalive = 15
+	c.Transport.TLS.Force = o.TLSForce
 
 	c.Auth.Method = "token"
 	if o.Token == "" {
@@ -182,15 +184,14 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.Protocol = o.Protocol
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
-	t.DialServerTimeout = 10
-	// Exact mikeesierrah profile: a 20-connection warm pool keeps reconnects
-	// instant without a bursty SYN flood, the 30s/90s heartbeat pair tolerates
-	// lossy GRE without flapping, and the 120s dial keepalive holds idle
-	// control connections through DPI middleboxes.
-	t.DialServerKeepalive = 120
-	t.PoolCount = 20
-	t.HeartbeatInterval = 30
-	t.HeartbeatTimeout = 90
+	t.DialServerTimeout = 5
+	// Zero-stall profile: a 40-connection warm pool keeps reconnects instant,
+	// the 10s/25s heartbeat pair detects a dead GRE path quickly, and the 15s
+	// dial keepalive holds idle control connections through DPI middleboxes.
+	t.DialServerKeepalive = 15
+	t.PoolCount = 40
+	t.HeartbeatInterval = 10
+	t.HeartbeatTimeout = 25
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 

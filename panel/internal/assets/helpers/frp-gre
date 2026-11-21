@@ -26,15 +26,15 @@ load_env() {
     [[ -r "$env_file" ]] || { echo "frp-gre: missing env file $env_file" >&2; exit 1; }
 
     LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""
-    MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
+    MTU=""; MSS_MODE="1220"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$env_file"
 
     [[ -n "$LOCAL_PUBLIC_IP" && -n "$REMOTE_PUBLIC_IP" && -n "$IFACE" \
        && -n "$LOCAL_PRIVATE_IP" && -n "$REMOTE_PRIVATE_IP" ]] \
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
-    MTU="${MTU:-1320}"
-    MSS_MODE="${MSS_MODE:-clamp}"
+    MTU="${MTU:-1280}"
+    MSS_MODE="${MSS_MODE:-1220}"
     TXQUEUELEN="${TXQUEUELEN:-1000}"
     [[ "$TXQUEUELEN" =~ ^[0-9]+$ ]] || TXQUEUELEN=1000
 }
@@ -230,6 +230,9 @@ cmd_up() {
     local cur_txq
     cur_txq="$(cat "/sys/class/net/$IFACE/tx_queue_len" 2>/dev/null || echo '')"
     [[ -n "$cur_txq" && "$cur_txq" == "$TXQUEUELEN" ]] || ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
+    # fq keeps the tunnel's egress queue fair under mixed ACK/bulk traffic and
+    # pairs with BBR; harmless (and silently skipped) on kernels without it.
+    tc qdisc replace dev "$IFACE" root fq 2>/dev/null || true
     apply_tuning
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT

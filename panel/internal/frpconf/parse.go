@@ -126,7 +126,7 @@ var (
 	}
 	serverTransportKeys = map[string]bool{
 		"quic": true, "heartbeatTimeout": true, "maxPoolCount": true, "tcpMux": true,
-		"tcpMuxKeepaliveInterval": true, "tcpKeepalive": true,
+		"tcpMuxKeepaliveInterval": true, "tcpKeepalive": true, "tls": true,
 	}
 	clientTopKeys = map[string]bool{
 		"serverAddr": true, "serverPort": true, "user": true, "loginFailExit": true,
@@ -181,6 +181,11 @@ func classifyServer(m map[string]any) (string, bool) {
 				return bad, false
 			}
 			if sub != nil {
+				if tsub, ok2 := sub["tls"].(map[string]any); ok2 {
+					if bad, ok := firstUnknown(tsub, serverTLSKeys, "transport.tls."); !ok {
+						return bad, false
+					}
+				}
 				if qsub, ok2 := sub["quic"].(map[string]any); ok2 {
 					if bad, ok := firstUnknown(qsub, quicKeys, "transport.quic."); !ok {
 						return bad, false
@@ -260,6 +265,9 @@ var webServerKeys = map[string]bool{"addr": true, "port": true, "user": true, "p
 
 // tlsKeys covers the one TLS field the canonical client renderer emits.
 var tlsKeys = map[string]bool{"enable": true}
+
+// serverTLSKeys covers the server-side TLS switch the suite writes.
+var serverTLSKeys = map[string]bool{"force": true}
 
 // ListConfigs returns the .toml basenames (without extension) in a config dir.
 // These are the valid systemd instance names for frps@*/frpc@*.

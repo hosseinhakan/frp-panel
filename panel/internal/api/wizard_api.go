@@ -35,7 +35,7 @@ const (
 	wizardForeignPrivate = "10.100.111.1/30" // frpc side (exit)
 	wizardServerAddr     = "10.100.111.2"
 	wizardDefaultPort    = 7025
-	wizardMTU            = 1320   // safe across Iran ISP/MPLS/PPPoE paths (1400 black-holes)
+	wizardMTU            = 1280   // safe across Iran ISP/MPLS/PPPoE paths (1400 black-holes)
 	wizardMSS            = "1220" // safe TCPMSS clamp for GRE (1240 is the other recommended value)
 )
 
@@ -59,6 +59,10 @@ type wizardGREFRPReq struct {
 	ServerName      string `json:"serverName"`
 	BindAddr        string `json:"bindAddr"` // "" = allocated GRE IP; or "::" / "0.0.0.0"
 	RawSpeed        bool   `json:"rawSpeed"`
+	// EncryptTLS forces the Iran frps to require TLS 1.3 and the Foreign frpc
+	// to enable it. nil keeps the mirror payload's value (Foreign) or false
+	// (Iran), so an explicit JSON boolean always wins.
+	EncryptTLS *bool `json:"encrypt_tls"`
 
 	// Foreign (exit) inputs.
 	MirrorPayload  string `json:"mirrorPayload"`
@@ -89,6 +93,7 @@ type mirrorParams struct {
 	ControlPort     int
 	Protocol        string
 	Token           string
+	TLSEnable       bool   // frps forces TLS 1.3, frpc enables it
 	Ports           string // optional forwarded-port list (from the Foreign installer)
 }
 
@@ -194,6 +199,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		BindAddr: bindAddr,
 		BindPort: port,
 		Protocol: proto,
+		TLSForce: req.EncryptTLS != nil && *req.EncryptTLS,
 		Token:    token,
 	})
 	if err != nil {
@@ -233,6 +239,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		ControlPort:     port,
 		Protocol:        protoName,
 		Token:           cfg.Auth.Token,
+		TLSEnable:       cfg.Transport.TLS.Force,
 	}
 
 	wd := map[string]any{"enabled": false, "skipped": true}
@@ -250,6 +257,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 			"name": name, "file": path, "bindAddr": cfg.BindAddr, "bindPort": port,
 			"proxyBindAddr": cfg.ProxyBindAddr,
 			"protocol":      protoName, "token": cfg.Auth.Token, "unit": unit,
+			"tls": cfg.Transport.TLS.Force,
 		},
 		"watchdog":       wd,
 		"verify":         gate.VerifyMode,
@@ -273,6 +281,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 	clientProto, _ := wizardClientProtocol(protoName)
 	if _, fs, ferr := buildForeignScript(foreignT, serverAddr, port, cfg.Auth.Token, clientProto, foreignScriptOptions{
 		Ports: "8989", Proto: "tcp", LocalIP: "127.0.0.1", ClientName: "client-" + itoa(port),
+		TLS: cfg.Transport.TLS.Force,
 	}); ferr == nil {
 		resp["foreign_script"] = fs
 	} else {
@@ -422,8 +431,8 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
-	// mikeesierrah profile: TLS/encryption/compression default off; the
-	// Raw Speed toggle remains available for callers that want to be explicit.
+	// Per-proxy encryption stays off (TLS 1.3 protects the control link); the
+	// tunnel-wide TLS mode is mirrored from the Iran frps.
 	encrypt := false
 	cfg, err := frpconf.NewClientConfig(frpconf.ClientOptions{
 		ServerAddr:     mp.ServerAddr,
@@ -433,7 +442,7 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		Ports:          specs,
 		Proto:          proto,
 		LocalIP:        localIP,
-		UseTLS:         false,
+		UseTLS:         mp.TLSEnable,
 		UseEncryption:  &encrypt,
 		UseCompression: false,
 		WebPort:        webPort,
@@ -673,6 +682,9 @@ func resolveMirror(req *wizardGREFRPReq) (mirrorParams, error) {
 	if v := strings.TrimSpace(req.MSSMode); v != "" {
 		mp.MSSMode = v
 	}
+	if req.EncryptTLS != nil {
+		mp.TLSEnable = *req.EncryptTLS
+	}
 
 	if mp.Iface == "" {
 		mp.Iface = wizardIface
@@ -784,6 +796,12 @@ func applyMirrorKey(mp *mirrorParams, key, val string) error {
 		mp.ControlPort = n
 	case "PROTOCOL":
 		mp.Protocol = strings.ToLower(val)
+	case "TLS_ENABLE", "ENCRYPT_TLS":
+		on, err := strconv.ParseBool(strings.ToLower(val))
+		if err != nil {
+			return fmt.Errorf("invalid %s %q in mirror payload", key, val)
+		}
+		mp.TLSEnable = on
 	case "TOKEN":
 		mp.Token = val
 	case "PORTS", "LOCAL_PORTS":
@@ -834,6 +852,7 @@ func renderMirrorPayload(m mirrorParams) string {
 	fmt.Fprintf(&b, "SERVER_ADDR=%s\n", m.ServerAddr)
 	fmt.Fprintf(&b, "CONTROL_PORT=%d\n", m.ControlPort)
 	fmt.Fprintf(&b, "PROTOCOL=%s\n", m.Protocol)
+	fmt.Fprintf(&b, "TLS_ENABLE=%t\n", m.TLSEnable)
 	fmt.Fprintf(&b, "TOKEN=%s\n", m.Token)
 	return b.String()
 }

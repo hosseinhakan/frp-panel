@@ -240,6 +240,79 @@ func TestRenderServerGoldenPlain(t *testing.T) {
 	checkGolden(t, "server-plain.toml", RenderServer(serverPlainFixture()))
 }
 
+// Enabling transport TLS must round-trip through render, parse, classify and
+// merge so structured edits never silently drop the frps-side requirement.
+func TestServerTLSForceRoundTrip(t *testing.T) {
+	c, err := NewServerConfig(ServerOptions{
+		BindAddr: "10.100.111.2", BindPort: 7025, TLSForce: true, Token: goldenToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := RenderServer(c)
+	if !strings.Contains(rendered, "transport.tls.force = true") {
+		t.Fatalf("renderer omitted transport.tls.force:\n%s", rendered)
+	}
+	cfg, err := ParseServer([]byte(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Transport.TLS.Force {
+		t.Error("parser dropped transport.tls.force")
+	}
+	if _, unknown, err := Classify([]byte(rendered), KindServer); err != nil || unknown != "" {
+		t.Errorf("classify = %q/%v, want managed with no unknown keys", unknown, err)
+	}
+	cfg.Transport.HeartbeatTimeout = 30
+	merged, err := MergeServer([]byte(rendered), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedCfg, err := ParseServer(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mergedCfg.Transport.TLS.Force {
+		t.Errorf("merge dropped transport.tls.force:\n%s", merged)
+	}
+
+	// Turning it off removes the key again (no stale force = true).
+	cfg.Transport.TLS.Force = false
+	merged, err = MergeServer(merged, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offCfg, err := ParseServer(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offCfg.Transport.TLS.Force || strings.Contains(string(merged), "force") {
+		t.Errorf("merge kept a stale transport.tls.force:\n%s", merged)
+	}
+}
+
+// The v1.2.9 zero-stall transport profile is the suite default.
+func TestDefaultTransportProfile(t *testing.T) {
+	srv, err := NewServerConfig(ServerOptions{BindPort: 7000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.Transport.HeartbeatTimeout != 25 || srv.Transport.TCPKeepalive != 15 ||
+		srv.Transport.MaxPoolCount != 65535 || srv.Transport.TCPMux {
+		t.Errorf("server transport = %+v, want heartbeat 25 / keepalive 15 / pool 65535 / no mux", srv.Transport)
+	}
+
+	cli, err := NewClientConfig(ClientOptions{ServerAddr: "10.100.111.2", Token: goldenToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cli.Transport.PoolCount != 40 || cli.Transport.DialServerTimeout != 5 ||
+		cli.Transport.DialServerKeepalive != 15 || cli.Transport.HeartbeatInterval != 10 ||
+		cli.Transport.HeartbeatTimeout != 25 || cli.Transport.TCPMux || cli.LoginFailExit {
+		t.Errorf("client transport = %+v, want pool 40 / dial 5+15 / heartbeat 10+25 / no mux", cli.Transport)
+	}
+}
+
 // A private/GRE bindAddr must not leak onto the forwarded user ports: frps has
 // to keep the control port on the tunnel while the forwarded ports stay public.
 func TestServerProxyBindAddrForPrivateBindAddr(t *testing.T) {
@@ -390,8 +463,8 @@ func TestClassify(t *testing.T) {
 	if err != nil || style != StyleManaged {
 		t.Errorf("live server style=%v unknown=%q err=%v, want managed", style, unknown, err)
 	}
-	if unknown != "" && unknown != "transport.tls" {
-		t.Errorf("live server first unknown = %q, want transport.tls or empty", unknown)
+	if unknown != "" && unknown != "transport.tls" && unknown != "transport.tls.enable" {
+		t.Errorf("live server first unknown = %q, want transport.tls.enable or empty", unknown)
 	}
 }
 

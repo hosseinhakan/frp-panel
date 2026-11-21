@@ -33,7 +33,10 @@ type foreignScriptReq struct {
 	Proto            string `json:"proto"` // both | tcp | udp
 	LocalIP          string `json:"localIp"`
 	RawSpeed         bool   `json:"rawSpeed"`
-	ClientName       string `json:"clientName"`
+	// EncryptTLS overrides the TLS mode copied from the linked frps. nil keeps
+	// the frps value (transport.tls.force).
+	EncryptTLS *bool  `json:"encrypt_tls"`
+	ClientName string `json:"clientName"`
 }
 
 type foreignScriptOptions struct {
@@ -41,6 +44,7 @@ type foreignScriptOptions struct {
 	Proto      string
 	LocalIP    string
 	RawSpeed   bool
+	TLS        bool
 	ClientName string
 }
 
@@ -101,6 +105,10 @@ func (s *Server) handleServerForeignScript(w http.ResponseWriter, r *http.Reques
 	if clientName == "" {
 		clientName = "client-" + strconv.Itoa(cfg.BindPort)
 	}
+	tlsEnabled := cfg.Transport.TLS.Force
+	if req.EncryptTLS != nil {
+		tlsEnabled = *req.EncryptTLS
+	}
 
 	// Remote ports are allocated on the Iran frps; refuse a collision before
 	// the operator pastes a command that frp would reject at runtime.
@@ -128,6 +136,7 @@ func (s *Server) handleServerForeignScript(w http.ResponseWriter, r *http.Reques
 		Proto:      req.Proto,
 		LocalIP:    req.LocalIP,
 		RawSpeed:   req.RawSpeed,
+		TLS:        tlsEnabled,
 		ClientName: clientName,
 	})
 	if err != nil {
@@ -340,7 +349,7 @@ func buildForeignScript(t gre.Tunnel, serverAddr string, serverPort int, token, 
 		Ports:          specs,
 		Proto:          proto,
 		LocalIP:        localIP,
-		UseTLS:         false,
+		UseTLS:         o.TLS,
 		UseEncryption:  &encrypt,
 		UseCompression: false,
 	})
@@ -415,6 +424,7 @@ func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientCon
 	w("SERVER_ADDR=%s", shellSingle(serverAddr))
 	w("SERVER_PORT=%s", shellSingle(strconv.Itoa(cfg.ServerPort)))
 	w("PROTOCOL=%s", shellSingle(cfg.Transport.Protocol))
+	w("TLS_ENABLE=%s", shellSingle(strconv.FormatBool(cfg.Transport.TLS.Enable)))
 	w("TOKEN=%s", shellSingle(cfg.Auth.Token))
 	w("PORTS=%s", shellSingle(clientPortsSpec(cfg)))
 	w("CLIENT_NAME=%s", shellSingle(clientName))
@@ -599,6 +609,7 @@ func renderForeignScript(t gre.Tunnel, serverAddr string, cfg *frpconf.ClientCon
 	w("sysctl -w net.ipv4.tcp_notsent_lowat=4294967295 >/dev/null 2>&1 || true")
 	w("sysctl -w net.ipv4.tcp_fastopen=0 >/dev/null 2>&1 || true")
 	w("ip link set dev \"$IFACE\" txqueuelen \"$TXQUEUELEN\" 2>/dev/null || true")
+	w("tc qdisc replace dev \"$IFACE\" root fq 2>/dev/null || true")
 	w("GC_CRON='0 */3 * * * pkill -10 -x frpc; pkill -10 -x frps'")
 	w("if command -v crontab >/dev/null 2>&1; then")
 	w("  crontab -l 2>/dev/null | grep -Fq \"$GC_CRON\" || { (crontab -l 2>/dev/null; echo \"$GC_CRON\") | crontab -; }")

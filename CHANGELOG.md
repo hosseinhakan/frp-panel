@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.2.9 — TLS 1.3 tunnel encryption, zero-stall transport profile
+
+### Added
+
+- **TLS 1.3 tunnel encryption** across every setup path. The Reverse GRE+FRP
+  wizard (Iran and Foreign), the Foreign Setup command generator and
+  `frp-manager reverse` now accept `encrypt_tls` / `--encrypt-tls true|false`.
+  When enabled, the Iran frps emits `transport.tls.force = true` and the
+  Foreign frpc emits `transport.tls.enable = true`; per-proxy
+  `transport.useEncryption` stays `false` so traffic is not double-encrypted.
+- **`transport.tls.force` support in `frpconf`** (structured parse, render,
+  merge and `PUT /api/servers/{name}`) plus a **TLS Force** toggle in the frps
+  Create/Edit modal, an **Encrypt Tunnel (TLS 1.3)** toggle in the frpc
+  Create/Edit modal, and a `TLS 1.3` badge on encrypted frps/frpc rows.
+- **`TLS_ENABLE='true|false'`** in the generated `FRP_FOREIGN_SETUP` and in the
+  mirror payload, so the Foreign node reproduces the Iran frps TLS mode even
+  when only the payload is pasted (an explicit JSON `encrypt_tls` still wins).
+- **`tc qdisc replace dev "$IFACE" root fq`** inside `frp-gre up` and the
+  Foreign installer, so the GRE device itself is scheduled with `fq`.
+
+### Changed
+
+- **GRE MTU lowered to 1280** (from 1320) with `MSS_MODE = 1220` in
+  `frp-gre`, the GRE wizard/API and `FRP_FOREIGN_SETUP`, eliminating the
+  PMTUD black holes that stalled mid-stream YouTube/video playback.
+- **New zero-stall transport defaults**: frpc `poolCount=40`,
+  `dialServerTimeout=5`, `dialServerKeepalive=15`, `heartbeatInterval=10`,
+  `heartbeatTimeout=25`, `loginFailExit=false`, `tcpMux=false`; frps
+  `heartbeatTimeout=25`, `tcpKeepalive=15`, `maxPoolCount=65535`,
+  `tcpMux=false`. The CLI, Web wizard and generated scripts all emit the same
+  values.
+- Non-destructive GRE reuse and the v1.2.8 tuning cleanup (no
+  `tcp_notsent_lowat` / `tcp_fastopen`) are preserved unchanged.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`, and
+  `scripts/check-sync.sh` (including the regenerated `frp-gre` heredoc).
+
 ## v1.2.8 — mikeesierrah profile, non-destructive GRE, streaming tuning
 
 ### Changed

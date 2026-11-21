@@ -53,6 +53,9 @@ func RenderServer(c *ServerConfig) string {
 	w("transport.tcpMux = %t", c.Transport.TCPMux)
 	w("transport.tcpMuxKeepaliveInterval = %d", c.Transport.TCPMuxKeepaliveInterval)
 	w("transport.tcpKeepalive = %d", c.Transport.TCPKeepalive)
+	if c.Transport.TLS.Force {
+		w("transport.tls.force = true")
+	}
 	w("")
 	w("auth.method = %q", c.Auth.Method)
 	w("auth.token = %q", c.Auth.Token)

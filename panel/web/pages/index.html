@@ -328,10 +328,16 @@
                           </div>
                         </div>
                       </div>
+                      <div class="row mt1">
+                        <label class="check">
+                          <input type="checkbox" x-model="rev.encryptTls">
+                          Encrypt tunnel (TLS 1.3) — frps <span class="mono">transport.tls.force</span> + frpc <span class="mono">transport.tls.enable</span>
+                        </label>
+                      </div>
                       <p class="faint small mt05">
                         Creates <span class="mono" x-text="rev.iface || 'gt11'"></span>
                         (<span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.2/30')"></span> ↔
-                        <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1320,
+                        <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1280,
                         NOTRACK proto 47, TCPMSS clamp 1240/1220), uses your token (or auto-generates one),
                         and binds frps to the GRE IP by default so the control port stays off the public internet.
                         Busy interfaces, subnets and ports are re-allocated automatically.
@@ -350,6 +356,7 @@
                       <div class="field">
                         <label>Mirror payload from the Iran node</label>
                         <textarea class="input rawedit" x-model="rev.mirrorPayload" spellcheck="false"
+                                  @input="revSyncTLS()"
                                   placeholder="Paste the IFACE=… TOKEN=… payload or the full FRP_FOREIGN_SETUP script here"></textarea>
                         <span class="hint">Accepts both the plain KEY=VALUE payload and the generated Foreign setup script; shell lines are ignored.</span>
                       </div>
@@ -408,6 +415,12 @@
                         </div>
                       </div>
                       <div class="row mt1">
+                        <label class="check">
+                          <input type="checkbox" x-model="rev.encryptTls">
+                          Encrypt tunnel (TLS 1.3) — follows <span class="mono">TLS_ENABLE</span> from the mirror payload
+                        </label>
+                      </div>
+                      <div class="row mt05">
                         <label class="check">
                           <input type="checkbox" x-model="rev.rawSpeed">
                           Raw speed — TLS &amp; FRP encryption OFF (use for VLESS/VMess/Hysteria already-encrypted traffic)
@@ -480,6 +493,7 @@
                             </div>
                           </div>
                           <div class="row mt05">
+                            <label class="check"><input type="checkbox" x-model="rev.encryptTls"> Encrypt tunnel (TLS 1.3)</label>
                             <label class="check"><input type="checkbox" x-model="rev.foreignRawSpeed"> Raw speed — TLS &amp; FRP encryption OFF</label>
                             <div class="grow"></div>
                             <button type="button" class="btn" :disabled="rev.foreignBusy" @click="revGenForeign()">Generate command</button>
@@ -609,6 +623,7 @@
                       <tr>
                         <td>
                           <span class="mono" x-text="r.name"></span>
+                          <template x-if="r.tlsForce"><span class="pill ok" title="transport.tls.force = true">TLS 1.3</span></template>
                           <template x-if="r.parseError"><span class="pill bad" title="the file no longer parses">parse error</span></template>
                           <template x-if="r.style === 'advanced' || r.style === 'template'">
                             <span class="pill warn" x-text="r.style + ' — raw edits only'"></span>
@@ -687,6 +702,7 @@
                     </div>
                   </div>
                   <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="wiz.tlsForce"> force TLS 1.3 (transport.tls.force)</label>
                     <label class="check"><input type="checkbox" x-model="wiz.tcpMux"> enable tcpMux</label>
                     <label class="check"><input type="checkbox" x-model="wiz.webEnabled"> metrics webServer (127.0.0.1, auto port 7500+)</label>
                   </div>
@@ -750,10 +766,11 @@
                     <div class="field">
                       <label>heartbeatTimeout</label>
                       <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
-                      <span class="hint">seconds · stability default 45</span>
+                      <span class="hint">seconds · stability default 25</span>
                     </div>
                   </div>
                   <div class="row mt05">
+                    <label class="check"><input type="checkbox" x-model="edit.tlsForce"> force TLS 1.3 (transport.tls.force)</label>
                     <label class="check"><input type="checkbox" x-model="edit.tcpMux"> enable tcpMux</label>
                   </div>
                   <details class="mt1">
@@ -762,7 +779,7 @@
                       <div class="field">
                         <label>tcpKeepalive</label>
                         <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.tcpKeepalive">
-                        <span class="hint">seconds · stability default 30</span>
+                        <span class="hint">seconds · stability default 15</span>
                       </div>
                       <div class="field">
                         <label>maxPoolCount</label>
@@ -835,8 +852,8 @@
                   </p>
                   <div class="row mt05">
                     <span class="pill mono" x-text="'MTU ' + foreign.mtu + ' · MSS ' + foreign.mssMode + ' · TXQ ' + foreign.txqueuelen"></span>
-                    <span class="pill" :class="foreign.rawSpeed ? 'ok' : 'warn'"
-                          x-text="foreign.rawSpeed ? 'raw speed on (TLS/encryption off)' : 'TLS / encryption on'"></span>
+                    <span class="pill" :class="foreign.rawSpeed ? 'ok' : (foreign.encryptTls ? 'ok' : 'warn')"
+                          x-text="foreign.rawSpeed ? 'raw speed on (TLS/encryption off)' : (foreign.encryptTls ? 'TLS 1.3 on' : 'TLS off')"></span>
                     <span class="pill" :class="foreign.proxyBindOk ? 'ok' : 'bad'"
                           x-text="'proxyBindAddr ' + (foreign.proxyBindAddr || 'auto') + (foreign.proxyBindOk ? ' — public ports OK' : ' — forwarded ports unreachable')"></span>
                   </div>
@@ -876,6 +893,7 @@
                     </div>
                   </div>
                   <div class="row mt1">
+                    <label class="check"><input type="checkbox" x-model="foreign.encryptTls"> Encrypt tunnel (TLS 1.3)</label>
                     <label class="check"><input type="checkbox" x-model="foreign.rawSpeed"> Raw speed — TLS &amp; FRP encryption OFF</label>
                     <div class="grow"></div>
                     <button type="button" class="btn primary" :disabled="foreign.busy" @click="genForeign()">Generate command</button>
@@ -989,6 +1007,7 @@
                   </div>
 
                   <div class="row mb05">
+                    <template x-if="r.tls"><span class="pill ok" title="transport.tls.enable = true">TLS 1.3</span></template>
                     <span class="pill" :class="r.tls ? 'ok' : 'warn'" x-text="r.tls ? 'tls on' : 'tls off'"></span>
                     <span class="pill idle" x-text="'mux ' + (r.tcpMux ? 'on' : 'off')"></span>
                     <span class="pill idle" x-text="r.proxies.length + ' proxies'"></span>
@@ -1131,7 +1150,7 @@
                     <label class="check"><input type="checkbox" x-model="wiz.rawSpeed" @change="applyRawSpeed('wiz')"> raw speed — TLS &amp; FRP encryption OFF</label>
                   </div>
                   <div class="row mt05">
-                    <label class="check"><input type="checkbox" x-model="wiz.useTls" :disabled="wiz.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="wiz.useTls" :disabled="wiz.rawSpeed"> encrypt tunnel (TLS 1.3)</label>
                     <label class="check"><input type="checkbox" x-model="wiz.useEncryption" :disabled="wiz.rawSpeed"> per-proxy encryption</label>
                     <label class="check"><input type="checkbox" x-model="wiz.useCompression" :disabled="wiz.rawSpeed"> compression</label>
                     <label class="check"><input type="checkbox" x-model="wiz.tcpMux" :disabled="wiz.rawSpeed"> tcpMux</label>
@@ -1242,7 +1261,7 @@
                         <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
                       </div>
                     </div>
-                    <p class="faint small mt05">stability profile: dial 10s / keepalive 30s / pool 15 / heartbeat 15s / timeout 45s / QUIC 10·30·100000.</p>
+                    <p class="faint small mt05">zero-stall profile: dial 5s / keepalive 15s / pool 40 / heartbeat 10s / timeout 25s / QUIC 10·30·100000.</p>
                   </details>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>
@@ -1251,7 +1270,7 @@
                     <label class="check"><input type="checkbox" x-model="edit.rawSpeed" @change="applyRawSpeed('edit')"> raw speed — TLS &amp; FRP encryption OFF</label>
                   </div>
                   <div class="row mt05">
-                    <label class="check"><input type="checkbox" x-model="edit.useTls" :disabled="edit.rawSpeed"> transport TLS</label>
+                    <label class="check"><input type="checkbox" x-model="edit.useTls" :disabled="edit.rawSpeed"> encrypt tunnel (TLS 1.3)</label>
                     <label class="check"><input type="checkbox" x-model="edit.useEncryption" :disabled="edit.rawSpeed"> per-proxy encryption</label>
                     <label class="check"><input type="checkbox" x-model="edit.useCompression" :disabled="edit.rawSpeed"> compression</label>
                     <label class="check"><input type="checkbox" x-model="edit.tcpMux" :disabled="edit.rawSpeed"> tcpMux</label>
@@ -1404,7 +1423,7 @@
                       <input class="input mono" x-model="form.remotePrivateIp" placeholder="auto — e.g. 10.100.111.2/30">
                     </div>
                   </div>
-                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair. MTU 1320 + txqueuelen 1000 are tuned for GRE-over-lossy long-haul links.</p>
+                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair. MTU 1280 + txqueuelen 1000 are tuned for GRE-over-lossy long-haul links.</p>
                   <template x-if="form.edit">
                     <div class="row mt05">
                       <label class="check"><input type="checkbox" x-model="form.restart"> Restart tunnel after save</label>

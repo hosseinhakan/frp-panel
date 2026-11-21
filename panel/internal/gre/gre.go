@@ -22,10 +22,10 @@ import (
 // Defaults matching the CLI wizard (frp-setup.sh gre_create_prompt).
 const (
 	// DefaultMTU is deliberately conservative: 1400 black-holes on some
-	// Iran ISP/MPLS/PPPoE paths (GRE adds 24 bytes of overhead), so 1320 is
+	// Iran ISP/MPLS/PPPoE paths (GRE adds 24 bytes of overhead), so 1280 is
 	// the safe default across the whole route.
-	DefaultMTU        = 1320
-	DefaultMSSMode    = "clamp"
+	DefaultMTU        = 1280
+	DefaultMSSMode    = "1220"
 	DefaultTXQueuelen = 1000
 	DefaultName       = "gt11"
 	defaultSubnet3o   = 111 // 10.100.<n>.0/30 suggestion starts at n=111

@@ -23,7 +23,7 @@ type greCreateReq struct {
 	RemotePublicIP  string `json:"remotePublicIp"`
 	LocalPrivateIP  string `json:"localPrivateIp"`  // default: suggested /30
 	RemotePrivateIP string `json:"remotePrivateIp"` // default: suggested /30
-	MTU             int    `json:"mtu"`             // default 1320
+	MTU             int    `json:"mtu"`             // default 1280
 	MSSMode         string `json:"mssMode"`         // default clamp
 	TXQueuelen      int    `json:"txqueuelen"`      // default 1000
 }

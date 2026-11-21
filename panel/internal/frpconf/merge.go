@@ -116,6 +116,14 @@ func MergeServer(raw []byte, c *ServerConfig) ([]byte, error) {
 	if c.Transport.TCPKeepalive > 0 {
 		t["tcpKeepalive"] = c.Transport.TCPKeepalive
 	}
+	if c.Transport.TLS.Force {
+		ensureTable(t, "tls")["force"] = true
+	} else if tls, ok := t["tls"].(map[string]any); ok {
+		delete(tls, "force")
+		if len(tls) == 0 {
+			delete(t, "tls")
+		}
+	}
 	if c.Transport.QUIC != (QUIC{}) {
 		q := ensureTable(t, "quic")
 		q["keepalivePeriod"] = c.Transport.QUIC.KeepalivePeriod

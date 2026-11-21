@@ -29,6 +29,7 @@ type serverCreateReq struct {
 	ProxyBindAddr string `json:"proxyBindAddr"` // "" = derive (0.0.0.0 for a GRE/private bindAddr)
 	Protocol      string `json:"protocol"`      // quic | kcp | none (default quic)
 	TCPMux        *bool  `json:"tcpMux"`
+	TLSForce      *bool  `json:"tlsForce"` // require TLS 1.3 on the control link
 	Token         string `json:"token"`
 	WebEnabled    *bool  `json:"webEnabled"` // default true (metrics dashboard)
 	WebPort       int    `json:"webPort"`
@@ -42,6 +43,7 @@ type serverUpdateReq struct {
 	ProxyBindAddr           *string `json:"proxyBindAddr"`
 	Protocol                *string `json:"protocol"`
 	TCPMux                  *bool   `json:"tcpMux"`
+	TLSForce                *bool   `json:"tlsForce"`
 	TCPMuxKeepaliveInterval *int    `json:"tcpMuxKeepaliveInterval"`
 	HeartbeatTimeout        *int    `json:"heartbeatTimeout"`
 	TCPKeepalive            *int    `json:"tcpKeepalive"`
@@ -70,6 +72,7 @@ type serverSummary struct {
 	WebUser                 string    `json:"webUser,omitempty"`
 	TokenSet                bool      `json:"tokenSet"`
 	TCPMux                  bool      `json:"tcpMux"`
+	TLSForce                bool      `json:"tlsForce"`
 	TCPMuxKeepaliveInterval int       `json:"tcpMuxKeepaliveInterval"`
 	HeartbeatTimeout        int       `json:"heartbeatTimeout"`
 	TCPKeepalive            int       `json:"tcpKeepalive"`
@@ -123,6 +126,7 @@ func (s *Server) serverSummary(name string) serverSummary {
 		sum.WebUser = cfg.WebServer.User
 		sum.TokenSet = cfg.Auth.Token != ""
 		sum.TCPMux = cfg.Transport.TCPMux
+		sum.TLSForce = cfg.Transport.TLS.Force
 		sum.TCPMuxKeepaliveInterval = cfg.Transport.TCPMuxKeepaliveInterval
 		sum.HeartbeatTimeout = cfg.Transport.HeartbeatTimeout
 		sum.TCPKeepalive = cfg.Transport.TCPKeepalive
@@ -251,6 +255,9 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TCPMux != nil {
 		opts.TCPMux = *req.TCPMux
+	}
+	if req.TLSForce != nil {
+		opts.TLSForce = *req.TLSForce
 	}
 	if webEnabled {
 		webUsed, err := frpconf.UsedWebServerPorts(s.paths.ServerDir)
@@ -446,6 +453,9 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TCPMux != nil {
 		cfg.Transport.TCPMux = *req.TCPMux
+	}
+	if req.TLSForce != nil {
+		cfg.Transport.TLS.Force = *req.TLSForce
 	}
 	if req.TCPMuxKeepaliveInterval != nil {
 		if err := checkRange("tcpMuxKeepaliveInterval", *req.TCPMuxKeepaliveInterval, 0, 3600); err != nil {

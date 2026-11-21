@@ -51,7 +51,7 @@ func TestGRECreateWritesCLIByteIdenticalEnv(t *testing.T) {
 	want := gre.RenderEnv(gre.Tunnel{
 		Name: "gt11", LocalPublicIP: "1.2.3.4", RemotePublicIP: "5.6.7.8", Iface: "gt11",
 		LocalPrivateIP: "10.100.111.1/30", RemotePrivateIP: "10.100.111.2/30",
-		MTU: 1320, MSSMode: "clamp", TXQueuelen: 1000,
+		MTU: 1280, MSSMode: "1220", TXQueuelen: 1000,
 	})
 	if string(raw) != want {
 		t.Errorf("env drift vs CLI:\n--- want ---\n%s\n--- got ---\n%s", want, raw)
@@ -201,8 +201,8 @@ frp-manager gre create \
   --iface gt11 \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
-  --mtu 1320 \
-  --mss clamp \
+  --mtu 1280 \
+  --mss 1220 \
   --txqueuelen 1000
 
 # Equivalent env file (`
@@ -212,8 +212,8 @@ REMOTE_PUBLIC_IP=1.2.3.4
 IFACE=gt11
 LOCAL_PRIVATE_IP=10.100.111.2/30
 REMOTE_PRIVATE_IP=10.100.111.1/30
-MTU=1320
-MSS_MODE=clamp
+MTU=1280
+MSS_MODE=1220
 TXQUEUELEN=1000
 `
 	if envText != want {
@@ -248,8 +248,8 @@ func TestGRELinkTest(t *testing.T) {
 	if resp["mtu_probe_ok"] != true {
 		t.Errorf("mtu_probe_ok = %v, want true", resp["mtu_probe_ok"])
 	}
-	if resp["mtu_probe_size"] != float64(1292) {
-		t.Errorf("mtu_probe_size = %v, want 1292", resp["mtu_probe_size"])
+	if resp["mtu_probe_size"] != float64(1252) {
+		t.Errorf("mtu_probe_size = %v, want 1252", resp["mtu_probe_size"])
 	}
 	checks, _ := resp["checks"].(map[string]any)
 	for _, key := range []string{"gre", "mtu", "public"} {

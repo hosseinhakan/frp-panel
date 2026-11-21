@@ -59,11 +59,12 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"transport.tcpMux = false",
 		`parseNumberRangePair "8989,8443" "8989,8443"`,
 		`name = "tcp-{{ $v.First }}"`,
-		"transport.dialServerTimeout = 10",
-		"transport.dialServerKeepalive = 120",
-		"transport.poolCount = 20",
-		"transport.heartbeatInterval = 30",
-		"transport.heartbeatTimeout = 90",
+		"transport.dialServerTimeout = 5",
+		"transport.dialServerKeepalive = 15",
+		"transport.poolCount = 40",
+		"transport.heartbeatInterval = 10",
+		"transport.heartbeatTimeout = 25",
+		"TLS_ENABLE='false'",
 		// Anti-disconnect hardening: local SYN MSS, rp_filter/MTU probing, and
 		// a non-destructive duplicate-GRE guard before ip tunnel add. A
 		// Protocol-47 NOTRACK is left to `frp-gre up`, which installs it
@@ -77,8 +78,9 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"reusing live GRE $IFACE",
 		"refusing to create $IFACE",
 		"/usr/local/bin/frpc",
-		"net.core.default_qdisc = fq", // BBR + fq tuning
-		"pkill -10 -x frpc",           // 3h GC cron
+		"net.core.default_qdisc = fq",           // BBR + fq tuning
+		`tc qdisc replace dev "$IFACE" root fq`, // fq on the GRE device itself
+		"pkill -10 -x frpc",                     // 3h GC cron
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("foreign script missing %q:\n%s", want, script)

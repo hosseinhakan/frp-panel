@@ -70,6 +70,11 @@ type ServerConfig struct {
 		TCPMux                  bool `toml:"tcpMux"`
 		TCPMuxKeepaliveInterval int  `toml:"tcpMuxKeepaliveInterval"`
 		TCPKeepalive            int  `toml:"tcpKeepalive"`
+		// TLS.Force makes frps require TLS 1.3 on the control connection. Every
+		// frpc must then set transport.tls.enable = true.
+		TLS struct {
+			Force bool `toml:"force"`
+		} `toml:"tls"`
 	} `toml:"transport"`
 
 	Auth struct {

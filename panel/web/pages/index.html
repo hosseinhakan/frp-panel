@@ -216,6 +216,7 @@
                     <div class="grow"></div>
                     <span class="pill idle" x-text="rev.step === 'role' ? 'step 1 · role' : (rev.step === 'form' ? 'step 2 · ' + rev.role : 'step 3 · done')"></span>
                   </div>
+                  <div class="modal-body">
 
                   <!-- step 1: role -->
                   <template x-if="rev.step === 'role'">
@@ -338,7 +339,7 @@
                         Creates <span class="mono" x-text="rev.iface || 'gt11'"></span>
                         (<span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.2/30')"></span> ↔
                         <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1280,
-                        NOTRACK proto 47, TCPMSS clamp 1240/1220), uses your token (or auto-generates one),
+                        NOTRACK proto 47, TCPMSS 1200 = MTU − 80B), uses your token (or auto-generates one),
                         and binds frps to the GRE IP by default so the control port stays off the public internet.
                         Busy interfaces, subnets and ports are re-allocated automatically.
                       </p>
@@ -575,6 +576,7 @@
                       </div>
                     </div>
                   </template>
+                  </div>
                 </div>
               </div>
             </template>
@@ -667,6 +669,7 @@
               <div class="modal-back" @keydown.escape.window="wiz = null">
                 <form class="modal" @submit.prevent="create()">
                   <div class="modal-head"><h2>New frps instance</h2></div>
+                  <div class="modal-body">
                   <div class="field-row">
                     <div class="field">
                       <label>Instance name</label>
@@ -711,6 +714,7 @@
                     <button type="button" class="btn ghost" @click="wiz = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="wiz.busy">Create instance</button>
                   </div>
+                  </div>
                 </form>
               </div>
             </template>
@@ -725,6 +729,7 @@
                       <span class="pill warn" x-text="edit.style + ' — use the TOML editor'"></span>
                     </template>
                   </div>
+                  <div class="modal-body">
                   <div class="field-row">
                     <div class="field">
                       <label>Bind address</label>
@@ -766,7 +771,7 @@
                     <div class="field">
                       <label>heartbeatTimeout</label>
                       <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
-                      <span class="hint">seconds · stability default 25</span>
+                      <span class="hint">seconds · balanced default 45</span>
                     </div>
                   </div>
                   <div class="row mt05">
@@ -779,7 +784,7 @@
                       <div class="field">
                         <label>tcpKeepalive</label>
                         <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.tcpKeepalive">
-                        <span class="hint">seconds · stability default 15</span>
+                        <span class="hint">seconds · balanced default 30</span>
                       </div>
                       <div class="field">
                         <label>maxPoolCount</label>
@@ -813,6 +818,7 @@
                     <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
                   </div>
+                  </div>
                 </form>
               </div>
             </template>
@@ -825,12 +831,14 @@
                     <h2 x-text="'TOML — frps@' + raw.name"></h2>
                     <span class="pill" :class="raw.style === 'managed' ? 'ok' : 'warn'" x-text="raw.style"></span>
                   </div>
+                  <div class="modal-body">
                   <textarea class="input rawedit" x-model="raw.content" spellcheck="false"></textarea>
                   <template x-if="raw.error"><div class="notice bad mt05"><span class="mono" x-text="raw.error"></span></div></template>
                   <template x-if="raw.saved"><div class="notice accent mt05"><span class="mono" x-text="raw.saved"></span></div></template>
                   <div class="modal-foot">
                     <button class="btn ghost" @click="raw = null">Close</button>
                     <button class="btn primary" :disabled="raw.busy" @click="saveRaw()">Save (verify + .bak)</button>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -845,6 +853,7 @@
                     <span class="pill" :class="foreign.linked ? 'ok' : 'warn'"
                           x-text="foreign.linked ? 'GRE tunnel linked' : 'no linked GRE tunnel'"></span>
                   </div>
+                  <div class="modal-body">
                   <p class="muted small">
                     Generates one self-contained Bash block for the Foreign server. It installs the GRE
                     tunnel + frpc, writes the matching config and verifies the link — only root SSH is
@@ -919,6 +928,7 @@
                   <div class="modal-foot">
                     <button type="button" class="btn ghost" @click="foreign = null">Close</button>
                   </div>
+                  </div>
                 </div>
               </div>
             </template>
@@ -928,6 +938,7 @@
               <div class="modal-back" @keydown.escape.window="regen = null">
                 <div class="modal">
                   <div class="modal-head"><h2 x-text="'New token — frps@' + regen.name"></h2></div>
+                  <div class="modal-body">
                   <div class="tokfield">
                     <input class="input mono" x-model="regen.token" readonly>
                     <button class="btn" @click="copyTok(regen.token)">copy</button>
@@ -940,6 +951,7 @@
                   <div class="modal-foot">
                     <button class="btn primary" @click="regen = null">Done</button>
                   </div>
+                  </div>
                 </div>
               </div>
             </template>
@@ -949,6 +961,7 @@
               <div class="modal-back">
                 <div class="modal">
                   <div class="modal-head"><h2 x-text="once.title"></h2></div>
+                  <div class="modal-body">
                   <p class="muted small">Copy the token now — it is the credential your clients will use.</p>
                   <div class="tokfield">
                     <input class="input mono" x-model="once.token" readonly>
@@ -964,6 +977,7 @@
                   <p class="faint small mt05" x-text="'verify: ' + once.verify + ' · backup: ' + (once.backup || 'n/a')"></p>
                   <div class="modal-foot">
                     <button class="btn primary" @click="once = null">Done</button>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -1092,6 +1106,7 @@
               <div class="modal-back" @keydown.escape.window="wiz = null">
                 <form class="modal" @submit.prevent="create()">
                   <div class="modal-head"><h2>New frpc instance</h2></div>
+                  <div class="modal-body">
                   <div class="field-row">
                     <div class="field">
                       <label>Instance name</label>
@@ -1166,6 +1181,7 @@
                     <button type="button" class="btn ghost" @click="wiz = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="wiz.busy">Create instance</button>
                   </div>
+                  </div>
                 </form>
               </div>
             </template>
@@ -1175,6 +1191,7 @@
               <div class="modal-back" @keydown.escape.window="edit = null">
                 <form class="modal" @submit.prevent="saveEdit()">
                   <div class="modal-head"><h2 x-text="'Edit frpc@' + edit.name"></h2></div>
+                  <div class="modal-body">
                   <div class="field-row">
                     <div class="field">
                       <label>Server address</label>
@@ -1261,7 +1278,7 @@
                         <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
                       </div>
                     </div>
-                    <p class="faint small mt05">zero-stall profile: dial 5s / keepalive 15s / pool 40 / heartbeat 10s / timeout 25s / QUIC 10·30·100000.</p>
+                    <p class="faint small mt05">balanced profile: dial 10s / keepalive 30s / pool 20 / heartbeat 15s / timeout 45s / tcpMux off / QUIC 10·30·100000.</p>
                   </details>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>
@@ -1290,6 +1307,7 @@
                     <button type="button" class="btn ghost" @click="edit = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="edit.busy">Save (verify + .bak)</button>
                   </div>
+                  </div>
                 </form>
               </div>
             </template>
@@ -1302,12 +1320,14 @@
                     <h2 x-text="'TOML — frpc@' + raw.name"></h2>
                     <span class="pill" :class="raw.style === 'managed' ? 'ok' : 'warn'" x-text="raw.style"></span>
                   </div>
+                  <div class="modal-body">
                   <textarea class="input rawedit" x-model="raw.content" spellcheck="false"></textarea>
                   <template x-if="raw.error"><div class="notice bad mt05"><span class="mono" x-text="raw.error"></span></div></template>
                   <template x-if="raw.saved"><div class="notice accent mt05"><span class="mono" x-text="raw.saved"></span></div></template>
                   <div class="modal-foot">
                     <button class="btn ghost" @click="raw = null">Close</button>
                     <button class="btn primary" :disabled="raw.busy" @click="saveRaw()">Save (verify + .bak)</button>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -1379,6 +1399,7 @@
                   <div class="modal-head">
                     <h2 x-text="form.edit ? 'Edit GRE tunnel — ' + form.iface : 'New GRE tunnel'"></h2>
                   </div>
+                  <div class="modal-body">
                   <div class="field-row">
                     <div class="field">
                       <label>Tunnel / interface name</label>
@@ -1391,10 +1412,11 @@
                     <div class="field">
                       <label>MSS mode</label>
                       <select class="select" x-model="form.mssMode">
-                        <option value="clamp">clamp to pmtu (recommended)</option>
+                        <option value="clamp">clamp to pmtu</option>
                         <option value="1360">set-mss 1360</option>
                         <option value="1240">set-mss 1240</option>
-                        <option value="1220">set-mss 1220</option>
+                        <option value="1200">set-mss 1200 (MTU 1280 − 80B, recommended)</option>
+                        <option value="1220">set-mss 1220 (legacy)</option>
                         <option value="off">off</option>
                       </select>
                     </div>
@@ -1423,7 +1445,7 @@
                       <input class="input mono" x-model="form.remotePrivateIp" placeholder="auto — e.g. 10.100.111.2/30">
                     </div>
                   </div>
-                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair. MTU 1280 + txqueuelen 1000 are tuned for GRE-over-lossy long-haul links.</p>
+                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair. MTU 1280, MSS 1200 and txqueuelen 1000 are tuned for GRE-over-lossy long-haul links.</p>
                   <template x-if="form.edit">
                     <div class="row mt05">
                       <label class="check"><input type="checkbox" x-model="form.restart"> Restart tunnel after save</label>
@@ -1434,6 +1456,7 @@
                     <button type="button" class="btn ghost" @click="form = null">Cancel</button>
                     <button type="submit" class="btn primary" :disabled="form.busy" x-text="form.edit ? 'Save tunnel' : 'Create tunnel'"></button>
                   </div>
+                  </div>
                 </form>
               </div>
             </template>
@@ -1443,6 +1466,7 @@
               <div class="modal-back" @keydown.escape.window="test = null">
                 <div class="modal">
                   <div class="modal-head"><h2 x-text="'Link test — ' + test.name"></h2></div>
+                  <div class="modal-body">
                   <template x-if="test.running"><p class="muted">probing the GRE peer, DF MTU and public baseline…</p></template>
                   <template x-if="test.result && !test.result.error">
                     <div>
@@ -1486,6 +1510,7 @@
                   <div class="modal-foot">
                     <button class="btn primary" @click="test = null">Close</button>
                   </div>
+                  </div>
                 </div>
               </div>
             </template>
@@ -1499,10 +1524,12 @@
                     <div class="grow"></div>
                     <button class="btn" @click="copyMirror()">copy</button>
                   </div>
+                  <div class="modal-body">
                   <p class="muted small">Save this as the peer node's tunnel definition — the same seven fields, local/remote swapped.</p>
                   <pre class="logpane" x-text="mirror.env"></pre>
                   <div class="modal-foot">
                     <button class="btn primary" @click="mirror = null">Done</button>
+                  </div>
                   </div>
                 </div>
               </div>
@@ -2036,11 +2063,13 @@
     <div class="modal-back" @keydown.escape.window="$store.ui.answer(false)">
       <div class="modal" role="dialog" aria-modal="true">
         <div class="modal-head"><h2 x-text="$store.ui.confirmState.title"></h2></div>
+        <div class="modal-body">
         <p class="muted" x-text="$store.ui.confirmState.message"></p>
         <div class="modal-foot">
           <button class="btn ghost" @click="$store.ui.answer(false)">Cancel</button>
           <button class="btn" :class="$store.ui.confirmState.danger ? 'danger' : 'primary'"
                   @click="$store.ui.answer(true)" x-text="$store.ui.confirmState.confirmText"></button>
+        </div>
         </div>
       </div>
     </div>

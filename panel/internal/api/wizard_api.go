@@ -36,7 +36,7 @@ const (
 	wizardServerAddr     = "10.100.111.2"
 	wizardDefaultPort    = 7025
 	wizardMTU            = 1280   // safe across Iran ISP/MPLS/PPPoE paths (1400 black-holes)
-	wizardMSS            = "1220" // safe TCPMSS clamp for GRE (1240 is the other recommended value)
+	wizardMSS            = "1200" // MTU 1280 - 80B overhead (outer/inner IP + GRE + TCP timestamps)
 )
 
 // wizardTokenPattern bounds pasted tokens before they reach the TOML renderer
@@ -55,7 +55,7 @@ type wizardGREFRPReq struct {
 	Subnet          string `json:"subnet"` // optional 10.100.<n>.0/30; defaults to 10.100.111.0/30
 	ControlPort     int    `json:"controlPort"`
 	Protocol        string `json:"protocol"` // tcp | quic | kcp
-	MSSMode         string `json:"mssMode"`  // optional; default 1220
+	MSSMode         string `json:"mssMode"`  // optional; default 1200
 	ServerName      string `json:"serverName"`
 	BindAddr        string `json:"bindAddr"` // "" = allocated GRE IP; or "::" / "0.0.0.0"
 	RawSpeed        bool   `json:"rawSpeed"`
@@ -522,9 +522,9 @@ func (s *Server) wizardTunnel(localPub, remotePub, iface, localPriv, remotePriv,
 		mss = wizardMSS
 	}
 	switch mss {
-	case "clamp", "1360", "1240", "1220", "off":
+	case "clamp", "1360", "1240", "1200", "1220", "off":
 	default:
-		return gre.Tunnel{}, fmt.Errorf("invalid mssMode %q (want clamp|1360|1240|1220|off)", mss)
+		return gre.Tunnel{}, fmt.Errorf("invalid mssMode %q (want clamp|1360|1240|1200|1220|off)", mss)
 	}
 	t := gre.Tunnel{
 		Name:            iface,

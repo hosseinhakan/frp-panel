@@ -9,11 +9,11 @@ transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
 transport.quic.maxIncomingStreams = 100000
 
-transport.heartbeatTimeout = 25
+transport.heartbeatTimeout = 45
 transport.maxPoolCount = 65535
 transport.tcpMux = false
 transport.tcpMuxKeepaliveInterval = 10
-transport.tcpKeepalive = 15
+transport.tcpKeepalive = 30
 
 auth.method = "token"
 auth.token = "K7mQz2xVb9LrT4nY8wPd3cJ6hFgA1sEu"

@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.9 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.10 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
@@ -70,10 +70,13 @@ IP**, at the same forwarded port.
    fresh host). The wizard creates:
    - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1280`,
      `txqueuelen 1000`, `NOTRACK` for proto 47 and TCPMSS clamping (local SYN
-     MSS pinned to `1220` so PMTUD black holes cannot stall the control
-     channel), plus a persisted zero-drop `sysctl.d` profile (BBR + fq, 16 MB
-     buffers, deep backlogs, `rp_filter=0`, `tcp_mtu_probing`, `nf_conntrack`);
-     every field is editable from the GRE row after creation;
+     MSS pinned to `1200` = `MTU − 80B` so the inner packet fits and PMTUD
+     black holes cannot stall the control channel), an idempotent
+     `iptables -I INPUT 1 -i gtNN -j ACCEPT` so host firewalls never drop or
+     rate-limit GRE-carried FRP traffic, plus a persisted zero-drop `sysctl.d`
+     profile (BBR + fq, 16 MB buffers, deep backlogs, `rp_filter=0`,
+     `tcp_mtu_probing`, `nf_conntrack`); every field is editable from the GRE
+     row after creation;
    - a 32-char token (or your own custom token) and an `frps` instance bound to
      the tunnel IP by default — `::` and `0.0.0.0` are selectable in the form —
      while `proxyBindAddr` keeps the forwarded user ports public; then enables
@@ -98,14 +101,15 @@ IP**, at the same forwarded port.
    (`8989,8443,6000-6005`) plus the TCP / TCP+UDP selector. Either path creates
    the mirrored GRE tunnel (`…1/30 ↔ …2/30`; a busy local `gtNN` is renamed
    without touching the mirrored `/30`) and an `frpc` instance. Generated
-   configs default to the zero-stall profile: `tls.enable = false` unless
+   configs default to the balanced profile: `tls.enable = false` unless
    **Encrypt Tunnel (TLS 1.3)** is selected (which also forces
    `transport.tls.force = true` on the Iran `frps` and propagates through the
    mirror payload as `TLS_ENABLE`), per-proxy `useEncryption = false`,
-   compression off, compact `parseNumberRangePair` port templates,
-   `dial 5s / keepalive 15s / pool 40` and `heartbeat 10s / timeout 25s`. It
-   then pings the Iran tunnel IP and reports the frpc unit state, and allocates
-   the loopback metrics `webServer` port the watchdog uses for proxy health.
+   compression off, `transport.tcpMux = false`, compact
+   `parseNumberRangePair` port templates, `dial 10s / keepalive 30s / pool 20`
+   and `heartbeat 15s / timeout 45s`. It then pings the Iran tunnel IP and
+   reports the frpc unit state, and allocates the loopback metrics `webServer`
+   port the watchdog uses for proxy health.
 3. Point users/DNS at **`Iran Public IP:<forwarded port>`** (for example
    `1.2.3.4:443`).
 
@@ -147,12 +151,12 @@ Single-node usage works the same way — skip GRE and bind frps to `::`
 
 ### Config profile and maintenance
 
-Generated configs follow the `mikeesierrah/frp-script` layout with the v1.2.9
-zero-stall timers: frps `heartbeatTimeout=25`, `tcpKeepalive=15`,
+Generated configs follow the `mikeesierrah/frp-script` layout with the v1.2.10
+balanced timers: frps `heartbeatTimeout=45`, `tcpKeepalive=30`,
 `maxPoolCount=65535`, `tcpMux=false`, and `proxyBindAddr=0.0.0.0` whenever
 `bindAddr` is a GRE IP; frpc `tls.enable` follows the **Encrypt Tunnel (TLS
 1.3)** toggle (off by default), per-proxy encryption/compression off,
-`dial 5/15`, `poolCount=40`, `heartbeat 10/25`, and compact
+`tcpMux=false`, `dial 10/30`, `poolCount=20`, `heartbeat 15/45`, and compact
 `parseNumberRangePair` port templates. The Edit modal exposes every one of
 these fields (plus the QUIC block and `transport.tls.force`) and keeps both
 template and plain `[[proxies]]` configs editable.

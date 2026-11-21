@@ -145,6 +145,8 @@ func TestValidate(t *testing.T) {
 		{"bad mss mode", func(t *Tunnel) { t.MSSMode = "clampy" }, true},
 		{"mss off ok", func(t *Tunnel) { t.MSSMode = "off" }, false},
 		{"mss 1240 ok", func(t *Tunnel) { t.MSSMode = "1240" }, false},
+		{"mss 1200 ok", func(t *Tunnel) { t.MSSMode = "1200" }, false},
+		{"mss 1220 legacy ok", func(t *Tunnel) { t.MSSMode = "1220" }, false},
 		{"bad name", func(t *Tunnel) { t.Name = "way-too-long-tunnel-name!" }, true},
 	}
 	for _, tc := range cases {
@@ -254,6 +256,35 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if err := Delete(dir, "gt11"); err == nil {
 		t.Error("deleting a missing tunnel must fail")
+	}
+}
+
+// TestHelperDefaults pins the canonical frp-gre helper to the tunnel defaults:
+// MTU 1280 → MSS 1200 (MTU-80 overhead) and an idempotent INPUT ACCEPT so a
+// host firewall never drops or rate-limits GRE-carried frpc traffic.
+func TestHelperDefaults(t *testing.T) {
+	if DefaultMSSMode != "1200" {
+		t.Fatalf("DefaultMSSMode = %q, want 1200", DefaultMSSMode)
+	}
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate test file")
+	}
+	helper, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "assets", "helpers", "frp-gre"))
+	if err != nil {
+		t.Fatalf("read canonical frp-gre: %v", err)
+	}
+	for _, want := range []string{
+		`MSS_MODE="${MSS_MODE:-1200}"`,
+		`local_mss=$((MTU - 80))`,
+		`ipt -C INPUT -i "$IFACE" -j ACCEPT`,
+		`ipt -I INPUT 1 -i "$IFACE" -j ACCEPT`,
+		`ipt_purge filter INPUT -i "$IFACE" -j ACCEPT`,
+		`tc qdisc replace dev "$IFACE" root fq`,
+	} {
+		if !strings.Contains(string(helper), want) {
+			t.Errorf("frp-gre helper missing %q", want)
+		}
 	}
 }
 

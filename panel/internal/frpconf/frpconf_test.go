@@ -291,25 +291,25 @@ func TestServerTLSForceRoundTrip(t *testing.T) {
 	}
 }
 
-// The v1.2.9 zero-stall transport profile is the suite default.
+// The balanced v1.2.10 transport profile is the suite default.
 func TestDefaultTransportProfile(t *testing.T) {
 	srv, err := NewServerConfig(ServerOptions{BindPort: 7000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if srv.Transport.HeartbeatTimeout != 25 || srv.Transport.TCPKeepalive != 15 ||
+	if srv.Transport.HeartbeatTimeout != 45 || srv.Transport.TCPKeepalive != 30 ||
 		srv.Transport.MaxPoolCount != 65535 || srv.Transport.TCPMux {
-		t.Errorf("server transport = %+v, want heartbeat 25 / keepalive 15 / pool 65535 / no mux", srv.Transport)
+		t.Errorf("server transport = %+v, want heartbeat 45 / keepalive 30 / pool 65535 / no mux", srv.Transport)
 	}
 
 	cli, err := NewClientConfig(ClientOptions{ServerAddr: "10.100.111.2", Token: goldenToken})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cli.Transport.PoolCount != 40 || cli.Transport.DialServerTimeout != 5 ||
-		cli.Transport.DialServerKeepalive != 15 || cli.Transport.HeartbeatInterval != 10 ||
-		cli.Transport.HeartbeatTimeout != 25 || cli.Transport.TCPMux || cli.LoginFailExit {
-		t.Errorf("client transport = %+v, want pool 40 / dial 5+15 / heartbeat 10+25 / no mux", cli.Transport)
+	if cli.Transport.PoolCount != 20 || cli.Transport.DialServerTimeout != 10 ||
+		cli.Transport.DialServerKeepalive != 30 || cli.Transport.HeartbeatInterval != 15 ||
+		cli.Transport.HeartbeatTimeout != 45 || cli.Transport.TCPMux || cli.LoginFailExit {
+		t.Errorf("client transport = %+v, want pool 20 / dial 10+30 / heartbeat 15+45 / no mux", cli.Transport)
 	}
 }
 

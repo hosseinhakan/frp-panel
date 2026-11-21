@@ -43,8 +43,8 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	if tunnel["mtu"] != float64(1280) {
 		t.Errorf("mtu = %v", tunnel["mtu"])
 	}
-	if tunnel["mss_mode"] != "1220" {
-		t.Errorf("mss_mode = %v, want 1220", tunnel["mss_mode"])
+	if tunnel["mss_mode"] != "1200" {
+		t.Errorf("mss_mode = %v, want 1200", tunnel["mss_mode"])
 	}
 
 	server, _ := resp["server"].(map[string]any)
@@ -258,11 +258,11 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		`parseNumberRangePair "443,2053" "443,2053"`,
 		`localPort = {{ $v.First }}`,
 		`remotePort = {{ $v.Second }}`,
-		`transport.dialServerTimeout = 5`,
-		`transport.dialServerKeepalive = 15`,
-		`transport.poolCount = 40`,
-		`transport.heartbeatInterval = 10`,
-		`transport.heartbeatTimeout = 25`,
+		`transport.dialServerTimeout = 10`,
+		`transport.dialServerKeepalive = 30`,
+		`transport.poolCount = 20`,
+		`transport.heartbeatInterval = 15`,
+		`transport.heartbeatTimeout = 45`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("frpc config missing %q:\n%s", want, raw)

@@ -23,9 +23,11 @@ import (
 const (
 	// DefaultMTU is deliberately conservative: 1400 black-holes on some
 	// Iran ISP/MPLS/PPPoE paths (GRE adds 24 bytes of overhead), so 1280 is
-	// the safe default across the whole route.
+	// the safe default across the whole route. With 20B outer IPv4 + 4B GRE +
+	// 20B inner IPv4 + 32B TCP-with-timestamps = 76B (~80B with slack), the
+	// largest inner MSS that still fits is 1280-80 = 1200.
 	DefaultMTU        = 1280
-	DefaultMSSMode    = "1220"
+	DefaultMSSMode    = "1200"
 	DefaultTXQueuelen = 1000
 	DefaultName       = "gt11"
 	defaultSubnet3o   = 111 // 10.100.<n>.0/30 suggestion starts at n=111
@@ -46,12 +48,13 @@ type Tunnel struct {
 	LocalPrivateIP  string `json:"local_private_ip"`  // CIDR, e.g. 10.100.111.1/30
 	RemotePrivateIP string `json:"remote_private_ip"` // CIDR, e.g. 10.100.111.2/30
 	MTU             int    `json:"mtu"`
-	MSSMode         string `json:"mss_mode"` // clamp|1360|1240|1220|off
+	MSSMode         string `json:"mss_mode"` // clamp|1360|1240|1200|1220|off
 	TXQueuelen      int    `json:"txqueuelen"`
 }
 
 // MSSModes lists the accepted TCP MSS clamping modes (frp-gre mss_rules).
-var MSSModes = []string{"clamp", "1360", "1240", "1220", "off"}
+// 1200 is the MTU 1280 default; 1220 is kept for tunnels created by v1.2.9.
+var MSSModes = []string{"clamp", "1360", "1240", "1200", "1220", "off"}
 
 // Validate applies the same rules as the CLI's gre_create_do. It returns the
 // joined validation error (nil = ok) and a list of non-fatal warnings
@@ -82,7 +85,7 @@ func (t Tunnel) Validate() (warnings []string, err error) {
 	case t.TXQueuelen < 1 || t.TXQueuelen > 100000:
 		fail("invalid TXQUEUELEN: %d (want 1..100000)", t.TXQueuelen)
 	case !validMSS(t.MSSMode):
-		fail("invalid MSS mode: %s (want clamp|1360|1240|1220|off)", t.MSSMode)
+		fail("invalid MSS mode: %s (want clamp|1360|1240|1200|1220|off)", t.MSSMode)
 	}
 	if err != nil {
 		return nil, err

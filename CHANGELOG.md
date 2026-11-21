@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.2.10 — modal overflow fix, MTU-correct MSS, firewall-safe GRE
+
+### Fixed
+
+- **Tall modals no longer clip their footer.** The modal card is now a flex
+  column constrained to `90vh`; only `.modal-body` scrolls, while the header
+  and action row stay pinned. The backdrop also scrolls on short viewports, so
+  `Save` / `Cancel`, `tcpMux`, `Restart service after save` and the Reverse
+  GRE+FRP wizard buttons are always reachable (frps/frpc Create + Edit, Raw
+  TOML, Foreign Setup, GRE forms and the shared confirm dialog).
+- **MSS math now fits inside the GRE MTU.** With MTU `1280` and
+  IPv4(20) + GRE(4) + inner IPv4(20) + TCP-with-timestamps(32) = 76B overhead,
+  the default TCPMSS is `1200` (`MTU − 80`) instead of `1220`, eliminating
+  `1296 > 1280` stalls and timeouts. `frp-gre` computes `local_mss` as
+  `MTU − 80`; the wizard/API/CLI/`FRP_FOREIGN_SETUP` defaults and the GRE form
+  all use `1200` (legacy `1220` tunnels still parse and are cleaned up).
+- **Host firewall cannot drop GRE-carried FRP.** `frp-gre up` and
+  `FRP_FOREIGN_SETUP` now idempotently install
+  `iptables -C INPUT -i "$IFACE" -j ACCEPT || iptables -I INPUT 1 -i "$IFACE" -j ACCEPT`
+  (and remove it in `frp-gre down`), so `ufw` / `INPUT` policies no longer
+  cause `dial tcp 10.100.x.x:7029: i/o timeout`.
+
+### Changed
+
+- **Balanced transport defaults** (both `frpconf` and every generator):
+  frpc `loginFailExit=false`, `poolCount=20`, `dialServerTimeout=10`,
+  `dialServerKeepalive=30`, `heartbeatInterval=15`, `heartbeatTimeout=45`,
+  `tcpMux=false`; frps `heartbeatTimeout=45`, `tcpKeepalive=30`,
+  `maxPoolCount=65535`, `tcpMux=false`.
+- `transport.tcpMux = false` remains the strict default and is still persisted
+  when toggled in the Edit modals.
+- Strictly non-destructive GRE handling is unchanged: a healthy matching
+  tunnel is never stopped, deleted or restarted; `tc qdisc replace dev "$IFACE"
+  root fq` and the streaming-safe sysctl profile (`tcp_notsent_lowat` /
+  `tcp_fastopen` unset at runtime) are preserved.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`, and
+  `scripts/check-sync.sh` (including the regenerated `frp-gre` heredoc).
+
 ## v1.2.9 — TLS 1.3 tunnel encryption, zero-stall transport profile
 
 ### Added

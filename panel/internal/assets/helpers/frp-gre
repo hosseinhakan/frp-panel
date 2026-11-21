@@ -26,7 +26,7 @@ load_env() {
     [[ -r "$env_file" ]] || { echo "frp-gre: missing env file $env_file" >&2; exit 1; }
 
     LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""
-    MTU=""; MSS_MODE="1220"; TXQUEUELEN=""
+    MTU=""; MSS_MODE="1200"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$env_file"
 
@@ -34,7 +34,7 @@ load_env() {
        && -n "$LOCAL_PRIVATE_IP" && -n "$REMOTE_PRIVATE_IP" ]] \
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
     MTU="${MTU:-1280}"
-    MSS_MODE="${MSS_MODE:-1220}"
+    MSS_MODE="${MSS_MODE:-1200}"
     TXQUEUELEN="${TXQUEUELEN:-1000}"
     [[ "$TXQUEUELEN" =~ ^[0-9]+$ ]] || TXQUEUELEN=1000
 }
@@ -69,7 +69,7 @@ notrack_purge() {
 
 mss_rules() { # TCPMSS clamping on the GRE interface + host-local traffic
     case "$MSS_MODE" in
-        clamp|1360|1240|1220) ;;
+        clamp|1360|1240|1200|1220) ;;
         off) return 0 ;;
         *) echo "frp-gre: unknown MSS_MODE '$MSS_MODE', defaulting to clamp" >&2; MSS_MODE=clamp ;;
     esac
@@ -81,18 +81,18 @@ mss_rules() { # TCPMSS clamping on the GRE interface + host-local traffic
     ipt_ensure mangle FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $args
     # frps/frpc on THIS host originate their SYN via OUTPUT → POSTROUTING, which
     # bypasses FORWARD. Without this rule PMTUD blackholes stall the control
-    # channel. Always pin a safe MSS (1220) rather than relying on PMTUD.
+    # channel. Pin the inner MSS so the packet still fits inside the GRE MTU:
+    # 20B outer IPv4 + 4B GRE + 20B inner IPv4 + 32B TCP-with-timestamps = 76B,
+    # rounded up to 80B (1280 - 80 = 1200). Never derive MSS from PMTUD here.
     local local_mss
-    case "$MSS_MODE" in
-        1360|1240|1220) local_mss="$MSS_MODE" ;;
-        *) local_mss="1220" ;;
-    esac
+    local_mss=$((MTU - 80))
+    [[ "$local_mss" -ge 536 ]] || local_mss=1200
     ipt_ensure mangle POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$local_mss"
 }
 
 mss_purge() { # remove every MSS variant for this interface
     local variant
-    for variant in "--clamp-mss-to-pmtu" "--set-mss 1360" "--set-mss 1240" "--set-mss 1220"; do
+    for variant in "--clamp-mss-to-pmtu" "--set-mss 1360" "--set-mss 1240" "--set-mss 1220" "--set-mss 1200"; do
         # shellcheck disable=SC2086
         ipt_purge mangle FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $variant
         # shellcheck disable=SC2086
@@ -111,6 +111,18 @@ forward_rules() { # allow transit when the FORWARD policy is DROP
 forward_purge() {
     ipt_purge filter FORWARD -i "$IFACE" -j ACCEPT
     ipt_purge filter FORWARD -o "$IFACE" -j ACCEPT
+}
+
+input_rules() { # never let a host firewall (ufw / INPUT DROP) drop GRE traffic
+    # frpc/frps dial the tunnel IP; a rate-limited or dropped INPUT rule breaks
+    # the control channel with "dial tcp 10.100.x.x:7029: i/o timeout".
+    # Insert at the top so early DROP/rate-limit rules cannot pre-empt it.
+    ipt -C INPUT -i "$IFACE" -j ACCEPT >/dev/null 2>&1 \
+        || ipt -I INPUT 1 -i "$IFACE" -j ACCEPT
+}
+
+input_purge() {
+    ipt_purge filter INPUT -i "$IFACE" -j ACCEPT
 }
 
 apply_tuning() { # zero-drop kernel tuning + per-interface rp_filter
@@ -238,6 +250,7 @@ cmd_up() {
     notrack_ensure OUTPUT
     mss_rules
     forward_rules
+    input_rules
     echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  txq=$TXQUEUELEN"
 }
 
@@ -259,6 +272,7 @@ cmd_down() {
     notrack_purge OUTPUT
     mss_purge
     forward_purge
+    input_purge
     ip link set "$IFACE" down >/dev/null 2>&1 || true
     ip tunnel del "$IFACE" >/dev/null 2>&1 || ip link del "$IFACE" >/dev/null 2>&1 || true
     echo "frp-gre: $IFACE down"

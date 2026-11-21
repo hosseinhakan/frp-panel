@@ -483,7 +483,7 @@ P8 implementation notes:
 | Dashboard | node role badge (Iran/Foreign/standalone) + uptime; CPU/RAM/net sparklines; GRE + FRP status cards with quick restart; live latency chart (uPlot, per target); recent watchdog events |
 | Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign-setup/toml); edit always opens (raw modal only for non-range templates/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **proxyBindAddr defaults to `0.0.0.0`** whenever bindAddr is a private/GRE IP so forwarded ports stay public; **Foreign Setup** generates the one-click installer |
 | Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list with ranges (`8989,8443,6000-6005`) and a single TCP / TCP+UDP selector (edit replaces the list in place and keeps the compact `parseNumberRangePair` layout); edit exposes `loginFailExit`, `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`, `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, QUIC, TLS, per-proxy encryption/compression and restart-after-save; **Raw speed** forces TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
-| GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1320); **mirror-config** generator for the far node; the helper clamps local SYN MSS to 1220, NOTRACKs protocol 47 and relaxes rp_filter/MTU probing; delete with teardown confirmation |
+| GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1280, MSS 1200); **mirror-config** generator for the far node; the helper clamps local SYN MSS to `MTU − 80` (1200 at 1280), NOTRACKs protocol 47, installs an idempotent INPUT ACCEPT for the tunnel and relaxes rp_filter/MTU probing; delete with teardown confirmation |
 | Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); **System utilities** card: 3h FRP GC cron (+ badge), volatile journald logs, clear all logs |
 | Logs | unit picker (frps@*/frpc@*/gre-turbo/watchdog), live SSE pane, pause/follow, level filter, colored timestamps |
 | Stats | per-instance: active conns, traffic in/out per proxy (from FRP webServer), 24 h history graph |
@@ -501,8 +501,8 @@ REMOTE_PUBLIC_IP=5.6.7.8
 IFACE=gt11                 # default gt11, validated ^gt?[0-9]+$
 LOCAL_PRIVATE_IP=10.100.111.1/30
 REMOTE_PRIVATE_IP=10.100.111.2/30
-MTU=1320
-MSS_MODE=clamp             # clamp | 1360 | 1240 | 1220 | off
+MTU=1280
+MSS_MODE=1200              # clamp | 1360 | 1240 | 1200 | 1220 (legacy) | off
 ```
 
 ### 7.2 `gre-tunnel@.service` + `frp-gre` helper
@@ -534,16 +534,18 @@ with `File exists`):
 ```
 ip tunnel add gt11 mode gre local <LOCAL_PUBLIC_IP> remote <REMOTE_PUBLIC_IP> ttl 255
 ip addr add <LOCAL_PRIVATE_IP> dev gt11
-ip link set gt11 up mtu 1320
+ip link set gt11 up mtu 1280
 # conntrack bypass for GRE (proto 47):
 iptables -t raw -A PREROUTING -p 47 -j CT --notrack   # fallback: -j NOTRACK on old iptables
 iptables -t raw -A OUTPUT      -p 47 -j CT --notrack
 # MSS clamping both directions:
 iptables -t mangle -A FORWARD -o gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -A FORWARD -i gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-# host-originated SYN (OUTPUT → POSTROUTING bypasses FORWARD): always pin 1220
-iptables -t mangle -A POSTROUTING -o gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220
-# (MSS_MODE=1240|1220 swaps --clamp-mss-to-pmtu for --set-mss <value>)
+# host-originated SYN (OUTPUT → POSTROUTING bypasses FORWARD): pin MTU − 80 = 1200
+iptables -t mangle -A POSTROUTING -o gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1200
+# (MSS_MODE=1360|1240|1200|1220 swaps --clamp-mss-to-pmtu for --set-mss <value>)
+# host firewall must not drop GRE-carried FRP:
+iptables -C INPUT -i gt11 -j ACCEPT || iptables -I INPUT 1 -i gt11 -j ACCEPT
 sysctl -w net.ipv4.conf.gt11.rp_filter=0 net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.tcp_mtu_probing=1 net.ipv4.tcp_base_mss=1024
 # FORWARD accept pair if default policy is DROP; remote-private route implicit via /30 addr
@@ -740,7 +742,7 @@ Total ≈ 2.5–3 weeks solo. Sequence P0→P9; each phase ends with runnable, t
 | Some KVM providers drop proto 47 (GRE) | GRE wizard pre-flight link test + counters check before enabling persistence |
 | UDP-over-tcpMux edge cases on old FRP | Dual-TCP+UDP docs note: if UDP stalls, toggle mux off for that instance (one click) |
 | iptables-nft vs legacy | Use `iptables` (nft compat) commands — identical semantics on all 3 target distros; `frp-gre` falls back to `NOTRACK` on old raw-table syntax |
-| MSS black holes over GRE | `tcp_mtu_probing=1` in turbo + explicit MSS modes (clamp/1360/1240/1220) |
+| MSS black holes over GRE | `tcp_mtu_probing=1` in turbo + explicit MSS modes (clamp/1360/1240/1200/1220), default `MTU − 80` = 1200 |
 | Multi-instance webServer port collisions | 7500–7599 / 7400–7499 allocators with live port check |
 | 1 GB RAM nodes | Go binary ~30 MB; compression off by default; ZRAM optional; GC cron preserved |
 | Template-managed configs in panel UI | Detected + flagged; structured edit falls back to raw text editor |

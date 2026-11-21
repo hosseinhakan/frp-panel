@@ -87,14 +87,14 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	// Zero-stall profile: a short 25s heartbeat timeout pairs with frpc's
-	// 10s interval, and a 15s TCP keepalive keeps the control connection
-	// warm through DPI/stateful firewalls without flooding the GRE link.
-	c.Transport.HeartbeatTimeout = 25
+	// Balanced keepalive profile: a 45s heartbeat timeout pairs with frpc's
+	// 15s interval, and a 30s TCP keepalive keeps the control connection warm
+	// through DPI/stateful firewalls without drowning the GRE link in probes.
+	c.Transport.HeartbeatTimeout = 45
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 15
+	c.Transport.TCPKeepalive = 30
 	c.Transport.TLS.Force = o.TLSForce
 
 	c.Auth.Method = "token"
@@ -184,14 +184,15 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.Protocol = o.Protocol
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
-	t.DialServerTimeout = 5
-	// Zero-stall profile: a 40-connection warm pool keeps reconnects instant,
-	// the 10s/25s heartbeat pair detects a dead GRE path quickly, and the 15s
-	// dial keepalive holds idle control connections through DPI middleboxes.
-	t.DialServerKeepalive = 15
-	t.PoolCount = 40
-	t.HeartbeatInterval = 10
-	t.HeartbeatTimeout = 25
+	t.DialServerTimeout = 10
+	// Balanced profile: a 20-connection warm pool keeps reconnects instant,
+	// the 15s/45s heartbeat pair detects a dead GRE path without needless
+	// churn, and the 30s dial keepalive holds idle control connections
+	// through DPI middleboxes. tcpMux stays off (strict default).
+	t.DialServerKeepalive = 30
+	t.PoolCount = 20
+	t.HeartbeatInterval = 15
+	t.HeartbeatTimeout = 45
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 

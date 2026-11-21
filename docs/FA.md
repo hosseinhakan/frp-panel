@@ -94,7 +94,7 @@
 | لایه | چیست | در این پروژه |
 |---|---|---|
 | ۱. اینترنت | دو IP عمومی | `IP ایران` ↔ `IP خارج` |
-| ۲. تانل | GRE (پروتکل ۴۷) | اینترفیس `gt11`، شبکه‌ی `10.100.111.0/30`، MTU `1320` |
+| ۲. تانل | GRE (پروتکل ۴۷) | اینترفیس `gt11`، شبکه‌ی `10.100.111.0/30`، MTU `1280` |
 | ۳. FRP | کنترل + فوروارد | `frps` روی `10.100.111.2:7025` (ایران)، `frpc` روی خارج متصل به همان |
 | ۴. سرویس | پورت‌های شما | `remotePort` روی IP عمومی ایران → `localIP:localPort` روی خارج |
 
@@ -120,7 +120,7 @@
 ```sh
 ip tunnel add gt11 mode gre local <IP-عمومی-ایران> remote <IP-عمومی-خارج> ttl 255
 ip addr add 10.100.111.2/30 dev gt11
-ip link set gt11 mtu 1320 up
+ip link set gt11 mtu 1280 up
 ```
 
 و روی سرور خارج آدرس‌ها و local/remote برعکس می‌شوند (`10.100.111.1/30`).
@@ -135,10 +135,10 @@ ip link set gt11 mtu 1320 up
 
 دو راه‌حل با هم اعمال می‌شوند:
 
-- **MTU = 1320** روی اینترفیس تانل (پیش‌فرض همین پروژه).
+- **MTU = 1280** روی اینترفیس تانل (پیش‌فرض همین پروژه؛ MSS = `MTU − 80` = `1200`).
 - **TCP MSS clamping**: در بسته‌های `SYN` مقدار MSS کم می‌شود تا هیچ‌کدام از دو طرف
   بسته‌ی بزرگ‌تر از ظرفیت مسیر نسازند. helper این قانون را در جهت‌های ورودی و خروجی
-  روی `gt11` نصب می‌کند (حالت پیش‌فرض `clamp`؛ گزینه‌های `1360`، `1240`، `1220`، `off` هم هست).
+  روی `gt11` نصب می‌کند (حالت پیش‌فرض `clamp`؛ گزینه‌های `1360`، `1240`، `1200`، `1220`، `off` هم هست).
 
 ### conntrack bypass
 
@@ -313,7 +313,7 @@ sudo frp-manager
 
 IP عمومی ایران و IP عمومی خارج را وارد کنید. نام اینترفیس و پورت کنترل به‌صورت
 خودکار با اولین مقدار آزاد پر می‌شوند (`gt11` / `7025` روی سرور تازه). ویزارد
-تانل را با `10.100.<n>.2/30 ↔ 10.100.<n>.1/30`، MTU `1320`، `NOTRACK` پروتکل
+تانل را با `10.100.<n>.2/30 ↔ 10.100.<n>.1/30`، MTU `1280`، `NOTRACK` پروتکل
 ۴۷ و TCPMSS clamp می‌سازد، یک توکن ۳۲ کاراکتری تولید می‌کند، `frps` را **فقط**
 روی IP تانل بالا می‌آورد و در پایان **mirror payload** را چاپ می‌کند.
 
@@ -378,8 +378,8 @@ sudo frp-manager gre create \
   --iface gt11 \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
-  --mtu 1320 \
-  --mss 1220
+  --mtu 1280 \
+  --mss 1200
 ```
 
 یا از منوی تعاملی: `frp-manager` → گزینه **۱۰) GRE Tunnel Manager** → **۲) Create tunnel**.
@@ -562,13 +562,13 @@ ssh -p 6000 user@1.2.3.4
 frp-manager gre list
 frp-manager gre create --local-public IP --remote-public IP \
   [--iface gt11] [--local-private 10.100.111.1/30] \
-  [--remote-private 10.100.111.2/30] [--mtu 1320] [--mss clamp|1360|1240|1220|off]
+  [--remote-private 10.100.111.2/30] [--mtu 1280] [--mss clamp|1360|1240|1200|1220|off]
 frp-manager gre delete gt11
 frp-manager gre mirror gt11
 
 # ویزارد FRP over GRE Reverse (اگر iface/subnet/port اشغال باشد خودکار عوض می‌شود)
 frp-manager reverse iran --iran-public 1.2.3.4 --foreign-public 5.6.7.8 \
-  [--iface gt11] [--control-port 7025] [--protocol tcp|quic|kcp] [--mss 1220]
+  [--iface gt11] [--control-port 7025] [--protocol tcp|quic|kcp] [--mss 1200]
 frp-manager reverse foreign --payload /root/mirror.env \
   --ports 8443,2053,443 [--proto both|tcp|udp] [--local-ip 127.0.0.1]
 frp-manager reverse foreign --local-public 5.6.7.8 --remote-public 1.2.3.4 \
@@ -713,7 +713,7 @@ frp-manager backup import /root/frp-backup.tar.gz
 | `gt11` وجود ندارد | یونیت اجرا نشده / خطای env | `systemctl status gre-tunnel@gt11` و `journalctl -u gre-tunnel@gt11 -n 50` |
 | `ping` روی IP تانل جواب نمی‌دهد | طرف مقابل پیکربندی نشده، یا پروتکل ۴۷ بسته است | env دو طرف را مقایسه کنید (`frp-manager gre list`)، `ip tunnel show` |
 | تانل UP است ولی `frpc` وصل نمی‌شود | `bindAddr` سرور اشتباه، توکن ناهماهنگ، پورت/پروتکل متفاوت | `journalctl -u frps@server-7025 -f` روی ایران و `journalctl -u frpc@client-7025 -f` روی خارج |
-| `ping` کار می‌کند ولی SSH/HTTP نصفه می‌ماند | مشکل MTU | `ping -M do -s 1372 -I gt11 10.100.111.2` از خارج؛ اگر شکست خورد MSS را `1240` یا `1220` کنید |
+| `ping` کار می‌کند ولی SSH/HTTP نصفه می‌ماند | مشکل MTU | `ping -M do -s 1372 -I gt11 10.100.111.2` از خارج؛ اگر شکست خورد MSS را `1200` یا `1240` کنید |
 | `frps` بالا نمی‌آید | پورت اشغال است | `ss -lntp | grep 7025` روی ایران |
 | سرویس از IP عمومی ایران باز نمی‌شود | `frps` روی `0.0.0.0`/`::` بایند شده یا فایروال بسته است | `bindAddr` باید `10.100.111.2` باشد؛ پورت سرویس را در فایروال ایران باز کنید |
 | پنل از بیرون باز نمی‌شود | bind روی `127.0.0.1` است یا فایروال/پنل ابری بسته است | `--bind 0.0.0.0` (پیش‌فرض) و `ufw allow 9000/tcp`؛ پورت را در فایروال ارائه‌دهنده هم باز کنید |

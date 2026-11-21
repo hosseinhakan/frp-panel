@@ -59,17 +59,19 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"transport.tcpMux = false",
 		`parseNumberRangePair "8989,8443" "8989,8443"`,
 		`name = "tcp-{{ $v.First }}"`,
-		"transport.dialServerTimeout = 5",
-		"transport.dialServerKeepalive = 15",
-		"transport.poolCount = 40",
-		"transport.heartbeatInterval = 10",
-		"transport.heartbeatTimeout = 25",
+		"transport.dialServerTimeout = 10",
+		"transport.dialServerKeepalive = 30",
+		"transport.poolCount = 20",
+		"transport.heartbeatInterval = 15",
+		"transport.heartbeatTimeout = 45",
 		"TLS_ENABLE='false'",
 		// Anti-disconnect hardening: local SYN MSS, rp_filter/MTU probing, and
 		// a non-destructive duplicate-GRE guard before ip tunnel add. A
 		// Protocol-47 NOTRACK is left to `frp-gre up`, which installs it
 		// idempotently.
-		`iptables -t mangle -A POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220`,
+		"LOCAL_MSS=$((MTU - 80))",
+		`iptables -t mangle -A POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$LOCAL_MSS"`,
+		`iptables -C INPUT -i "$IFACE" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i "$IFACE" -j ACCEPT`,
 		`net.ipv4.conf."$IFACE".rp_filter=0`,
 		"net.ipv4.tcp_mtu_probing=1",
 		"ip -d tunnel show", // conflicts are detected, never deleted

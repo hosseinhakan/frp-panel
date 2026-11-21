@@ -112,6 +112,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/gre", s.authed(s.handleGREList))
 	mux.HandleFunc("POST /api/gre", s.authed(s.handleGRECreate))
 	mux.HandleFunc("GET /api/gre/{name}", s.authed(s.handleGREGet))
+	mux.HandleFunc("PUT /api/gre/{name}", s.authed(s.handleGREUpdate))
 	mux.HandleFunc("DELETE /api/gre/{name}", s.authed(s.handleGREDelete))
 	mux.HandleFunc("GET /api/gre/{name}/mirror", s.authed(s.handleGREMirror))
 	mux.HandleFunc("POST /api/gre/{name}/test", s.authed(s.handleGRETest))

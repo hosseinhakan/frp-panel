@@ -833,6 +833,13 @@
                     tunnel + frpc, writes the matching config and verifies the link — only root SSH is
                     needed there (no frp-panel, no frp-manager).
                   </p>
+                  <div class="row mt05">
+                    <span class="pill mono" x-text="'MTU ' + foreign.mtu + ' · MSS ' + foreign.mssMode + ' · TXQ ' + foreign.txqueuelen"></span>
+                    <span class="pill" :class="foreign.rawSpeed ? 'ok' : 'warn'"
+                          x-text="foreign.rawSpeed ? 'raw speed on (TLS/encryption off)' : 'TLS / encryption on'"></span>
+                    <span class="pill" :class="foreign.proxyBindOk ? 'ok' : 'bad'"
+                          x-text="'proxyBindAddr ' + (foreign.proxyBindAddr || 'auto') + (foreign.proxyBindOk ? ' — public ports OK' : ' — forwarded ports unreachable')"></span>
+                  </div>
                   <div class="field-row mt1">
                     <div class="field">
                       <label>Foreign public IP</label>
@@ -1235,7 +1242,7 @@
                         <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
                       </div>
                     </div>
-                    <p class="faint small mt05">stability profile: dial 10s / keepalive 30s / pool 10 / heartbeat 15s / timeout 45s / QUIC 10·30·100000.</p>
+                    <p class="faint small mt05">stability profile: dial 10s / keepalive 30s / pool 15 / heartbeat 15s / timeout 45s / QUIC 10·30·100000.</p>
                   </details>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>
@@ -1323,7 +1330,7 @@
                   <dl class="kv">
                     <dt>local</dt><dd x-text="t.local_public_ip + ' → ' + t.local_private_ip"></dd>
                     <dt>remote</dt><dd x-text="t.remote_public_ip + ' → ' + t.remote_private_ip"></dd>
-                    <dt>mtu / mss</dt><dd x-text="t.mtu + ' / ' + t.mss_mode"></dd>
+                    <dt>mtu / mss / txq</dt><dd x-text="t.mtu + ' / ' + t.mss_mode + ' / ' + t.txqueuelen"></dd>
                     <dt>rx / tx</dt>
                     <dd>
                       <span x-text="FRP.fmtBytes(t.status.rxBytes) + ' / ' + FRP.fmtBytes(t.status.txBytes)"></span>
@@ -1332,6 +1339,7 @@
                   </dl>
                   <div class="svc-actions">
                     <button class="btn tiny" @click="linkTest(t)">link test</button>
+                    <button class="btn tiny" @click="openEdit(t)">edit</button>
                     <button class="btn tiny" @click="openMirror(t)">mirror config</button>
                     <button class="btn tiny danger" @click="remove(t)">delete</button>
                   </div>
@@ -1345,15 +1353,17 @@
               </div>
             </template>
 
-            <!-- create form -->
+            <!-- create / edit form -->
             <template x-if="form">
               <div class="modal-back" @keydown.escape.window="form = null">
-                <form class="modal" @submit.prevent="create()">
-                  <div class="modal-head"><h2>New GRE tunnel</h2></div>
+                <form class="modal" @submit.prevent="save()">
+                  <div class="modal-head">
+                    <h2 x-text="form.edit ? 'Edit GRE tunnel — ' + form.iface : 'New GRE tunnel'"></h2>
+                  </div>
                   <div class="field-row">
                     <div class="field">
                       <label>Tunnel / interface name</label>
-                      <input class="input mono" x-model="form.name" placeholder="gt11">
+                      <input class="input mono" x-model="form.name" placeholder="gt11" :disabled="form.edit">
                     </div>
                     <div class="field">
                       <label>MTU</label>
@@ -1368,6 +1378,10 @@
                         <option value="1220">set-mss 1220</option>
                         <option value="off">off</option>
                       </select>
+                    </div>
+                    <div class="field">
+                      <label>TX queue length</label>
+                      <input class="input mono" type="number" x-model="form.txqueuelen">
                     </div>
                   </div>
                   <div class="field-row mt05">
@@ -1390,11 +1404,16 @@
                       <input class="input mono" x-model="form.remotePrivateIp" placeholder="auto — e.g. 10.100.111.2/30">
                     </div>
                   </div>
-                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair.</p>
+                  <p class="faint small">Leave both private IPs blank to auto-suggest the next free 10.100.x.y/30 pair. MTU 1320 + txqueuelen 1000 are tuned for GRE-over-lossy long-haul links.</p>
+                  <template x-if="form.edit">
+                    <div class="row mt05">
+                      <label class="check"><input type="checkbox" x-model="form.restart"> Restart tunnel after save</label>
+                    </div>
+                  </template>
                   <template x-if="form.error"><div class="notice bad mt05"><span x-text="form.error"></span></div></template>
                   <div class="modal-foot">
                     <button type="button" class="btn ghost" @click="form = null">Cancel</button>
-                    <button type="submit" class="btn primary" :disabled="form.busy">Create tunnel</button>
+                    <button type="submit" class="btn primary" :disabled="form.busy" x-text="form.edit ? 'Save tunnel' : 'Create tunnel'"></button>
                   </div>
                 </form>
               </div>
@@ -1405,24 +1424,41 @@
               <div class="modal-back" @keydown.escape.window="test = null">
                 <div class="modal">
                   <div class="modal-head"><h2 x-text="'Link test — ' + test.name"></h2></div>
-                  <template x-if="test.running"><p class="muted">pinging the peer through the tunnel (3 probes)…</p></template>
+                  <template x-if="test.running"><p class="muted">probing the GRE peer, DF MTU and public baseline…</p></template>
                   <template x-if="test.result && !test.result.error">
                     <div>
                       <div class="row mb05">
                         <span class="pill" :class="test.result.reachable ? 'ok' : 'bad'"
-                              x-text="test.result.reachable ? 'peer reachable' : 'peer unreachable'"></span>
+                              x-text="test.result.reachable ? 'GRE peer reachable' : 'GRE peer unreachable'"></span>
                         <template x-if="test.result.rtt_ms !== undefined">
                           <span class="pill accent" x-text="'avg ' + FRP.fmtRtt(test.result.rtt_ms)"></span>
                         </template>
                         <template x-if="test.result.loss_pct !== undefined">
-                          <span class="pill" :class="test.result.loss_pct > 0 ? 'warn' : 'ok'" x-text="test.result.loss_pct + '% loss'"></span>
+                          <span class="pill" :class="test.result.loss_pct > 0 ? 'warn' : 'ok'" x-text="test.result.loss_pct + '% GRE loss'"></span>
                         </template>
+                        <span class="pill" :class="test.result.mtu_probe_ok ? 'ok' : 'warn'"
+                              x-text="test.result.mtu_probe_ok ? 'DF MTU ' + test.result.mtu_probe_size + ' OK' : 'DF MTU probe failed'"></span>
                       </div>
                       <dl class="kv">
                         <dt>through</dt><dd x-text="test.result.iface + ' → ' + test.result.peer"></dd>
+                        <dt>public</dt><dd x-text="test.result.peer ? 'baseline ' + (test.result.public_loss_pct || 0) + '% loss to public IP' : ''"></dd>
                         <dt>rx / tx</dt><dd x-text="FRP.fmtBytes(test.result.rx_bytes) + ' / ' + FRP.fmtBytes(test.result.tx_bytes)"></dd>
                       </dl>
-                      <pre class="logpane mt05" x-text="test.result.output"></pre>
+                      <template x-if="test.result.checks">
+                        <div class="mt1">
+                          <template x-for="(c, key) in test.result.checks" :key="key">
+                            <div class="mt05">
+                              <div class="row">
+                                <strong class="small" x-text="c.label"></strong>
+                                <span class="pill" :class="(c.ok || c.reachable) ? 'ok' : 'warn'"
+                                      x-text="c.ok !== undefined ? (c.ok ? 'ok' : 'failed') : (c.reachable ? 'reachable' : 'unreachable')"></span>
+                                <span class="faint small" x-text="c.target + (c.size ? ' · ' + c.size + 'B' : '') + (c.loss_pct !== undefined ? ' · ' + c.loss_pct + '% loss' : '')"></span>
+                              </div>
+                              <pre class="logpane mt05" x-text="c.output"></pre>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
                     </div>
                   </template>
                   <template x-if="test.result && test.result.error">
@@ -1444,7 +1480,7 @@
                     <div class="grow"></div>
                     <button class="btn" @click="copyMirror()">copy</button>
                   </div>
-                  <p class="muted small">Save this as the peer node's tunnel definition — the same six fields, local/remote swapped.</p>
+                  <p class="muted small">Save this as the peer node's tunnel definition — the same seven fields, local/remote swapped.</p>
                   <pre class="logpane" x-text="mirror.env"></pre>
                   <div class="modal-foot">
                     <button class="btn primary" @click="mirror = null">Done</button>

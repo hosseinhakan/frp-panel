@@ -1136,6 +1136,20 @@ document.addEventListener("alpine:init", () => {
             this.ipOf(t.remote_private_ip) === row.bindAddr
         ) || (this.tunnels.length === 1 ? this.tunnels[0] : null);
       const dflt = this.wizDefaults || {};
+      // The linked tunnel carries the zero-drop profile; show exactly what the
+      // generated script will write so the Foreign node cannot drift.
+      const mtu = linked && linked.mtu ? linked.mtu : 1320;
+      const mssMode = linked && linked.mss_mode ? linked.mss_mode : "1220";
+      const txqueuelen = linked && linked.txqueuelen ? linked.txqueuelen : 1000;
+      const bindAddr = String(row.bindAddr || "");
+      const explicitProxy = String(row.proxyBindAddr || "");
+      const effectiveProxy =
+        explicitProxy !== ""
+          ? explicitProxy
+          : ["", "0.0.0.0", "::"].includes(bindAddr)
+          ? bindAddr || "::"
+          : "0.0.0.0";
+      const proxyBindOk = effectiveProxy === "0.0.0.0" || effectiveProxy === "::";
       this.foreign = {
         row,
         linked: !!linked,
@@ -1146,6 +1160,11 @@ document.addEventListener("alpine:init", () => {
         proto: "tcp",
         localIp: "127.0.0.1",
         subnet: linked ? "" : dflt.subnet || "",
+        mtu,
+        mssMode,
+        txqueuelen,
+        proxyBindAddr: effectiveProxy,
+        proxyBindOk,
         rawSpeed: true,
         busy: false,
         error: "",
@@ -1509,7 +1528,7 @@ document.addEventListener("alpine:init", () => {
           tcpMuxKeepaliveInterval: c.tcpMuxKeepaliveInterval || 10,
           dialServerTimeout: c.dialServerTimeout || 10,
           dialServerKeepalive: c.dialServerKeepalive || 30,
-          poolCount: c.poolCount || 10,
+          poolCount: c.poolCount || 15,
           heartbeatInterval: c.heartbeatInterval || 15,
           heartbeatTimeout: c.heartbeatTimeout || 45,
           quicKeepalivePeriod: c.quicKeepalivePeriod || 10,
@@ -1546,7 +1565,7 @@ document.addEventListener("alpine:init", () => {
             tcpMuxKeepaliveInterval: Number(e.tcpMuxKeepaliveInterval) || 0,
             dialServerTimeout: Number(e.dialServerTimeout) || 10,
             dialServerKeepalive: Number(e.dialServerKeepalive) || 30,
-            poolCount: Number(e.poolCount) || 10,
+            poolCount: Number(e.poolCount) || 15,
             heartbeatInterval: Number(e.heartbeatInterval) || 15,
             heartbeatTimeout: Number(e.heartbeatTimeout) || 45,
             quicKeepalivePeriod: Number(e.quicKeepalivePeriod) || 10,
@@ -1661,6 +1680,7 @@ document.addEventListener("alpine:init", () => {
 
     openCreate() {
       this.form = {
+        edit: false,
         name: "gt11",
         localPublicIp: "",
         remotePublicIp: "",
@@ -1668,36 +1688,68 @@ document.addEventListener("alpine:init", () => {
         remotePrivateIp: "",
         mtu: 1320,
         mssMode: "clamp",
+        txqueuelen: 1000,
+        restart: true,
         busy: false,
         error: "",
       };
     },
 
-    async create() {
+    openEdit(t) {
+      this.form = {
+        edit: true,
+        name: t.name,
+        iface: t.iface,
+        localPublicIp: t.local_public_ip || "",
+        remotePublicIp: t.remote_public_ip || "",
+        localPrivateIp: t.local_private_ip || "",
+        remotePrivateIp: t.remote_private_ip || "",
+        mtu: t.mtu || 1320,
+        mssMode: t.mss_mode || "clamp",
+        txqueuelen: t.txqueuelen || 1000,
+        restart: true,
+        busy: false,
+        error: "",
+      };
+    },
+
+    async save() {
       const f = this.form;
       if (!f) return;
       f.busy = true;
       f.error = "";
       try {
-        const resp = await FRP.api("/api/gre", {
-          method: "POST",
-          body: {
-            name: f.name.trim(),
-            localPublicIp: f.localPublicIp.trim(),
-            remotePublicIp: f.remotePublicIp.trim(),
-            localPrivateIp: f.localPrivateIp.trim(),
-            remotePrivateIp: f.remotePrivateIp.trim(),
-            mtu: Number(f.mtu),
-            mssMode: f.mssMode,
-          },
-        });
+        const body = {
+          localPublicIp: f.localPublicIp.trim(),
+          remotePublicIp: f.remotePublicIp.trim(),
+          localPrivateIp: f.localPrivateIp.trim(),
+          remotePrivateIp: f.remotePrivateIp.trim(),
+          mtu: Number(f.mtu),
+          mssMode: f.mssMode,
+          txqueuelen: Number(f.txqueuelen),
+        };
+        let resp;
+        if (f.edit) {
+          body.restart = !!f.restart;
+          resp = await FRP.api(`/api/gre/${encodeURIComponent(f.name)}`, {
+            method: "PUT",
+            body,
+          });
+        } else {
+          body.name = f.name.trim();
+          resp = await FRP.api("/api/gre", { method: "POST", body });
+        }
         const t = resp.tunnel;
         const notes = [];
         if (resp.warnings && resp.warnings.length) notes.push(resp.warnings.join("; "));
-        if (resp.unit_error) notes.push("unit start failed: " + resp.unit_error);
+        if (resp.unit_error) notes.push("unit restart failed: " + resp.unit_error);
+        if (f.edit && resp.restarted === false && !resp.unit_error && !f.restart)
+          notes.push("restart deferred — run `systemctl restart gre-tunnel@" + t.name + "` to apply");
         this.form = null;
         this.$store.ui.push(
-          `tunnel ${t.name} created${notes.length ? " — " + notes.join("; ") : ""}`,
+          `tunnel ${t.name} ${f.edit ? "updated" : "created"}${
+            notes.length ? " — " + notes.join("; ") : ""
+          }`,
           resp.unit_error ? "warn" : "ok"
         );
         this.load();

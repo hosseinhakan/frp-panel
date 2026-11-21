@@ -24,10 +24,11 @@ const (
 	// DefaultMTU is deliberately conservative: 1400 black-holes on some
 	// Iran ISP/MPLS/PPPoE paths (GRE adds 24 bytes of overhead), so 1320 is
 	// the safe default across the whole route.
-	DefaultMTU      = 1320
-	DefaultMSSMode  = "clamp"
-	DefaultName     = "gt11"
-	defaultSubnet3o = 111 // 10.100.<n>.0/30 suggestion starts at n=111
+	DefaultMTU        = 1320
+	DefaultMSSMode    = "clamp"
+	DefaultTXQueuelen = 1000
+	DefaultName       = "gt11"
+	defaultSubnet3o   = 111 // 10.100.<n>.0/30 suggestion starts at n=111
 )
 
 // NamePattern is the tunnel-name charset shared by frp-gre and the CLI.
@@ -46,6 +47,7 @@ type Tunnel struct {
 	RemotePrivateIP string `json:"remote_private_ip"` // CIDR, e.g. 10.100.111.2/30
 	MTU             int    `json:"mtu"`
 	MSSMode         string `json:"mss_mode"` // clamp|1360|1240|1220|off
+	TXQueuelen      int    `json:"txqueuelen"`
 }
 
 // MSSModes lists the accepted TCP MSS clamping modes (frp-gre mss_rules).
@@ -77,6 +79,8 @@ func (t Tunnel) Validate() (warnings []string, err error) {
 		fail("invalid interface name: %s", t.Iface)
 	case t.MTU < 576 || t.MTU > 1500:
 		fail("invalid MTU: %d (want 576..1500)", t.MTU)
+	case t.TXQueuelen < 1 || t.TXQueuelen > 100000:
+		fail("invalid TXQUEUELEN: %d (want 1..100000)", t.TXQueuelen)
 	case !validMSS(t.MSSMode):
 		fail("invalid MSS mode: %s (want clamp|1360|1240|1220|off)", t.MSSMode)
 	}
@@ -109,6 +113,7 @@ func RenderEnv(t Tunnel) string {
 	b.WriteString("REMOTE_PRIVATE_IP=" + t.RemotePrivateIP + "\n")
 	b.WriteString("MTU=" + strconv.Itoa(t.MTU) + "\n")
 	b.WriteString("MSS_MODE=" + t.MSSMode + "\n")
+	b.WriteString("TXQUEUELEN=" + strconv.Itoa(t.TXQueuelen) + "\n")
 	return b.String()
 }
 
@@ -117,7 +122,7 @@ func RenderEnv(t Tunnel) string {
 // fields must parse — this file is sourced by a bash helper, so anything
 // suspicious is rejected outright.
 func ParseEnv(name, raw string) (Tunnel, error) {
-	t := Tunnel{Name: name, MTU: DefaultMTU, MSSMode: DefaultMSSMode}
+	t := Tunnel{Name: name, MTU: DefaultMTU, MSSMode: DefaultMSSMode, TXQueuelen: DefaultTXQueuelen}
 	seen := map[string]bool{}
 	for i, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -150,6 +155,12 @@ func ParseEnv(name, raw string) (Tunnel, error) {
 			t.MTU, seen[key] = n, true
 		case "MSS_MODE":
 			t.MSSMode, seen[key] = value, true
+		case "TXQUEUELEN":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return Tunnel{}, fmt.Errorf("gre: %s.env: TXQUEUELEN not numeric: %q", name, value)
+			}
+			t.TXQueuelen, seen[key] = n, true
 		default:
 			// tolerated, like bash `source` would
 		}
@@ -187,7 +198,8 @@ func (t Tunnel) MirrorText(envDir string) string {
 	fmt.Fprintf(&b, "  --local-private %s \\\n", m.LocalPrivateIP)
 	fmt.Fprintf(&b, "  --remote-private %s \\\n", m.RemotePrivateIP)
 	fmt.Fprintf(&b, "  --mtu %d \\\n", m.MTU)
-	fmt.Fprintf(&b, "  --mss %s\n", m.MSSMode)
+	fmt.Fprintf(&b, "  --mss %s \\\n", m.MSSMode)
+	fmt.Fprintf(&b, "  --txqueuelen %d\n", m.TXQueuelen)
 	b.WriteString("\n")
 	// This section mirrors the CLI's gre_mirror_print exactly (bare
 	// KEY=VALUE lines, no header comment).
@@ -199,6 +211,7 @@ func (t Tunnel) MirrorText(envDir string) string {
 	fmt.Fprintf(&b, "REMOTE_PRIVATE_IP=%s\n", m.RemotePrivateIP)
 	fmt.Fprintf(&b, "MTU=%d\n", m.MTU)
 	fmt.Fprintf(&b, "MSS_MODE=%s\n", m.MSSMode)
+	fmt.Fprintf(&b, "TXQUEUELEN=%d\n", m.TXQueuelen)
 	return b.String()
 }
 

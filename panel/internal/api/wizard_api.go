@@ -84,6 +84,7 @@ type mirrorParams struct {
 	RemotePrivateIP string
 	MTU             int
 	MSSMode         string
+	TXQueuelen      int
 	ServerAddr      string
 	ControlPort     int
 	Protocol        string
@@ -227,6 +228,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		RemotePrivateIP: t.LocalPrivateIP,
 		MTU:             t.MTU,
 		MSSMode:         t.MSSMode,
+		TXQueuelen:      t.TXQueuelen,
 		ServerAddr:      serverAddr, // frpc always dials the allocated GRE IP
 		ControlPort:     port,
 		Protocol:        protoName,
@@ -266,6 +268,7 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		RemotePrivateIP: t.LocalPrivateIP,
 		MTU:             t.MTU,
 		MSSMode:         t.MSSMode,
+		TXQueuelen:      t.TXQueuelen,
 	}
 	clientProto, _ := wizardClientProtocol(protoName)
 	if _, fs, ferr := buildForeignScript(foreignT, serverAddr, port, cfg.Auth.Token, clientProto, foreignScriptOptions{
@@ -327,6 +330,13 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return
+	}
+	// The mirror payload carries the exact tuning chosen on the Iran side.
+	if mp.MTU > 0 {
+		t.MTU = mp.MTU
+	}
+	if mp.TXQueuelen > 0 {
+		t.TXQueuelen = mp.TXQueuelen
 	}
 
 	portsInput := strings.TrimSpace(req.LocalPorts)
@@ -516,6 +526,7 @@ func (s *Server) wizardTunnel(localPub, remotePub, iface, localPriv, remotePriv,
 		RemotePrivateIP: remotePriv,
 		MTU:             wizardMTU,
 		MSSMode:         mss,
+		TXQueuelen:      gre.DefaultTXQueuelen,
 	}
 	if _, err := t.Validate(); err != nil {
 		return gre.Tunnel{}, err
@@ -678,6 +689,9 @@ func resolveMirror(req *wizardGREFRPReq) (mirrorParams, error) {
 	if mp.MSSMode == "" {
 		mp.MSSMode = wizardMSS
 	}
+	if mp.TXQueuelen == 0 {
+		mp.TXQueuelen = gre.DefaultTXQueuelen
+	}
 	if mp.ServerAddr == "" {
 		mp.ServerAddr = wizardServerAddr
 	}
@@ -754,6 +768,12 @@ func applyMirrorKey(mp *mirrorParams, key, val string) error {
 		mp.MTU = n
 	case "MSS_MODE":
 		mp.MSSMode = val
+	case "TXQUEUELEN":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("invalid TXQUEUELEN %q in mirror payload", val)
+		}
+		mp.TXQueuelen = n
 	case "SERVER_ADDR":
 		mp.ServerAddr = val
 	case "CONTROL_PORT", "SERVER_PORT":
@@ -810,6 +830,7 @@ func renderMirrorPayload(m mirrorParams) string {
 	fmt.Fprintf(&b, "REMOTE_PRIVATE_IP=%s\n", m.RemotePrivateIP)
 	fmt.Fprintf(&b, "MTU=%d\n", m.MTU)
 	fmt.Fprintf(&b, "MSS_MODE=%s\n", m.MSSMode)
+	fmt.Fprintf(&b, "TXQUEUELEN=%d\n", m.TXQueuelen)
 	fmt.Fprintf(&b, "SERVER_ADDR=%s\n", m.ServerAddr)
 	fmt.Fprintf(&b, "CONTROL_PORT=%d\n", m.ControlPort)
 	fmt.Fprintf(&b, "PROTOCOL=%s\n", m.Protocol)
@@ -826,12 +847,13 @@ func renderMirrorCommand(m mirrorParams, ports string) string {
   --remote-private %s \
   --mtu %d \
   --mss %s \
+  --txqueuelen %d \
   --control-port %d \
   --protocol %s \
   --token %s \
   --ports %s`,
 		m.LocalPublicIP, m.RemotePublicIP, m.Iface,
-		m.LocalPrivateIP, m.RemotePrivateIP, m.MTU, m.MSSMode,
+		m.LocalPrivateIP, m.RemotePrivateIP, m.MTU, m.MSSMode, m.TXQueuelen,
 		m.ControlPort, m.Protocol, m.Token, ports)
 }
 

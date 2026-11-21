@@ -180,11 +180,11 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
 	t.DialServerTimeout = 10
-	// Stability-tuned for high-loss Iran↔Foreign GRE links: a smaller pool
-	// avoids bursty SYN floods on reconnect, and the 15s/45s heartbeat pair
-	// fails over quickly without flapping.
+	// Stability-tuned for high-loss Iran↔Foreign GRE links: a 15-connection
+	// warm pool keeps reconnects instant without a bursty SYN flood, and the
+	// 15s/45s heartbeat pair fails over quickly without flapping.
 	t.DialServerKeepalive = 30
-	t.PoolCount = 10
+	t.PoolCount = 15
 	t.HeartbeatInterval = 15
 	t.HeartbeatTimeout = 45
 	t.TLS.Enable = o.UseTLS

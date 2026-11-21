@@ -25,6 +25,18 @@ type greCreateReq struct {
 	RemotePrivateIP string `json:"remotePrivateIp"` // default: suggested /30
 	MTU             int    `json:"mtu"`             // default 1320
 	MSSMode         string `json:"mssMode"`         // default clamp
+	TXQueuelen      int    `json:"txqueuelen"`      // default 1000
+}
+
+type greUpdateReq struct {
+	LocalPublicIP   string `json:"localPublicIp"`
+	RemotePublicIP  string `json:"remotePublicIp"`
+	LocalPrivateIP  string `json:"localPrivateIp"`
+	RemotePrivateIP string `json:"remotePrivateIp"`
+	MTU             int    `json:"mtu"`
+	MSSMode         string `json:"mssMode"`
+	TXQueuelen      int    `json:"txqueuelen"`
+	Restart         *bool  `json:"restart"` // default true: restart the unit after saving
 }
 
 type greStatus struct {
@@ -119,6 +131,9 @@ func (s *Server) handleGRECreate(w http.ResponseWriter, r *http.Request) {
 	if req.MSSMode == "" {
 		req.MSSMode = gre.DefaultMSSMode
 	}
+	if req.TXQueuelen == 0 {
+		req.TXQueuelen = gre.DefaultTXQueuelen
+	}
 
 	existing, _, err := gre.List(s.paths.GREDir)
 	if err != nil {
@@ -144,6 +159,7 @@ func (s *Server) handleGRECreate(w http.ResponseWriter, r *http.Request) {
 		RemotePrivateIP: req.RemotePrivateIP,
 		MTU:             req.MTU,
 		MSSMode:         req.MSSMode,
+		TXQueuelen:      req.TXQueuelen,
 	}
 	warnings, err := t.Validate()
 	if err != nil {
@@ -188,6 +204,106 @@ func (s *Server) handleGRECreate(w http.ResponseWriter, r *http.Request) {
 		body["unit_error"] = unitErr
 	}
 	writeJSON(w, http.StatusCreated, body)
+}
+
+// ---- update --------------------------------------------------------------------
+
+// handleGREUpdate edits an existing tunnel definition in place (name/iface are
+// immutable — they are the systemd instance and the env file stem). With
+// restart=true (the default) the unit is restarted so the new endpoints, MTU
+// and queue length take effect immediately.
+func (s *Server) handleGREUpdate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	existing, err := gre.Read(s.paths.GREDir, name)
+	if err != nil {
+		writeGREErr(w, err)
+		return
+	}
+
+	var req greUpdateReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	t := existing
+	if v := strings.TrimSpace(req.LocalPublicIP); v != "" {
+		t.LocalPublicIP = v
+	}
+	if v := strings.TrimSpace(req.RemotePublicIP); v != "" {
+		t.RemotePublicIP = v
+	}
+	if v := strings.TrimSpace(req.LocalPrivateIP); v != "" {
+		t.LocalPrivateIP = v
+	}
+	if v := strings.TrimSpace(req.RemotePrivateIP); v != "" {
+		t.RemotePrivateIP = v
+	}
+	if req.MTU > 0 {
+		t.MTU = req.MTU
+	}
+	if v := strings.TrimSpace(req.MSSMode); v != "" {
+		t.MSSMode = v
+	}
+	if req.TXQueuelen > 0 {
+		t.TXQueuelen = req.TXQueuelen
+	}
+	if t.TXQueuelen == 0 {
+		t.TXQueuelen = gre.DefaultTXQueuelen
+	}
+
+	warnings, err := t.Validate()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+
+	envPath := filepath.Join(s.paths.GREDir, t.Name+".env")
+	backup := ""
+	if old, rerr := os.ReadFile(envPath); rerr == nil {
+		bak := envPath + ".bak-" + backupTimestamp(s.now())
+		if werr := os.WriteFile(bak, old, 0o600); werr == nil {
+			backup = bak
+		}
+	}
+	if err := s.ensureGREAssets(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "failed to install GRE assets: %v", err)
+		return
+	}
+	if err := gre.Write(s.paths.GREDir, t); err != nil {
+		writeErr(w, http.StatusInternalServerError, "%v", err)
+		return
+	}
+
+	restart := true
+	if req.Restart != nil {
+		restart = *req.Restart
+	}
+	unitErr := ""
+	restarted := false
+	if restart {
+		unit := "gre-tunnel@" + t.Name
+		if out, rerr := s.runner.Systemctl("restart", unit); rerr != nil {
+			unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + rerr.Error())
+			audit("updated GRE tunnel %s but restart failed: %s", t.Name, unitErr)
+		} else {
+			restarted = true
+			audit("updated GRE tunnel %s (restarted)", t.Name)
+		}
+	} else {
+		audit("updated GRE tunnel %s (restart deferred)", t.Name)
+	}
+
+	resp := s.greResp(t)
+	body := map[string]any{
+		"tunnel":    resp,
+		"warnings":  warnings,
+		"backup":    backup,
+		"restarted": restarted,
+	}
+	if unitErr != "" {
+		body["unit_error"] = unitErr
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ensureGREAssets installs the canonical frp-gre helper and gre-tunnel@.service
@@ -266,20 +382,58 @@ func (s *Server) handleGRETest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	peer := strings.SplitN(t.RemotePrivateIP, "/", 2)[0]
-	out, err := s.runner.Exec("ping", "-c", "3", "-W", "2", "-I", t.Iface, peer)
+
+	// 1) GRE tunnel ping: 10 fast probes give an exact loss% over the link.
+	greOut, greErr := s.runner.Exec("ping", "-c", "10", "-i", "0.2", "-W", "1", "-I", t.Iface, peer)
+	greLoss, greAvg := parsePing(greOut)
+	greReachable := greErr == nil && greLoss < 100
+
+	// 2) DF MTU probe: a full-size packet with don't-fragment proves the
+	// configured MTU (minus 28 bytes of IP+ICMP headers) survives the path.
+	mtuSize := t.MTU - 28
+	if mtuSize < 576 {
+		mtuSize = 576
+	}
+	mtuOut, mtuErr := s.runner.Exec("ping", "-M", "do", "-s", strconv.Itoa(mtuSize),
+		"-c", "3", "-W", "2", "-I", t.Iface, peer)
+	mtuLoss, _ := parsePing(mtuOut)
+	mtuOK := mtuErr == nil && mtuLoss == 0
+
+	// 3) Public baseline: loss here but not over GRE points at the underlying
+	// datacenter route rather than protocol 47 / the tunnel.
+	pubOut, pubErr := s.runner.Exec("ping", "-c", "5", "-W", "2", t.RemotePublicIP)
+	pubLoss, pubAvg := parsePing(pubOut)
+	pubReachable := pubErr == nil && pubLoss < 100
+
+	checks := map[string]any{
+		"gre": map[string]any{
+			"label": "GRE tunnel ping", "target": peer,
+			"output":    strings.TrimSpace(greOut),
+			"reachable": greReachable, "loss_pct": greLoss, "rtt_ms": greAvg,
+		},
+		"mtu": map[string]any{
+			"label": "DF MTU probe", "target": peer, "size": mtuSize,
+			"output": strings.TrimSpace(mtuOut), "ok": mtuOK, "loss_pct": mtuLoss,
+		},
+		"public": map[string]any{
+			"label": "Public IP baseline", "target": t.RemotePublicIP,
+			"output":    strings.TrimSpace(pubOut),
+			"reachable": pubReachable, "loss_pct": pubLoss, "rtt_ms": pubAvg,
+		},
+	}
+
 	resp := map[string]any{
-		"name": name, "iface": t.Iface, "peer": peer, "output": strings.TrimSpace(out),
+		"name": name, "iface": t.Iface, "peer": peer,
+		"output":    strings.TrimSpace(greOut),
+		"reachable": greReachable, "loss_pct": greLoss,
+		"mtu_probe_ok": mtuOK, "mtu_probe_size": mtuSize,
+		"public_loss_pct": pubLoss, "checks": checks,
 	}
-	if err != nil {
-		resp["reachable"] = false
-		writeJSON(w, http.StatusOK, resp)
-		return
+	if greAvg > 0 {
+		resp["rtt_ms"] = greAvg
 	}
-	loss, avg := parsePing(out)
-	resp["reachable"] = avg > 0 || loss < 100
-	resp["loss_pct"] = loss
-	if avg > 0 {
-		resp["rtt_ms"] = avg
+	if pubAvg > 0 {
+		resp["public_rtt_ms"] = pubAvg
 	}
 	resp["rx_bytes"] = readNetStat(s.paths.SysNetDir, t.Iface, "rx_bytes")
 	resp["tx_bytes"] = readNetStat(s.paths.SysNetDir, t.Iface, "tx_bytes")

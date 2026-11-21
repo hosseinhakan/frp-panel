@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.2.7 — editable GRE tunnels, deeper tuning + 3-way link diagnostics
+
+### Added
+
+- **Edit an existing GRE tunnel from the panel.** Every GRE row now has an
+  *edit* action backed by `PUT /api/gre/{name}`. It updates both public IPs,
+  both private CIDRs, `MTU`, `MSS_MODE` and `TXQUEUELEN`, writes a timestamped
+  `.bak` of the old env and (by default) restarts `gre-tunnel@<name>`; a
+  *Restart tunnel after save* checkbox defers the restart when unchecked.
+  The name/interface stays immutable because it is the systemd instance.
+- **`TXQUEUELEN` (default `1000`) end-to-end.** Applied with
+  `ip link set dev <iface> txqueuelen`, persisted in `*.env`, rendered by the
+  mirror config and both quick-setup payloads, parsed by the Go model and the
+  `frp-manager gre create --txqueuelen` / `reverse {iran,foreign}
+  --txqueuelen` flags, and pre-filled into the Foreign installer.
+- **Three-part GRE link test.** `POST /api/gre/{name}/test` now returns
+  `checks.gre` (10 fast pings: loss/RTT), `checks.mtu` (a DF
+  `ping -M do -s <mtu-28>` acceptance probe) and `checks.public` (a baseline to
+  `REMOTE_PUBLIC_IP`), while keeping the legacy top-level fields. The test
+  modal renders each probe separately so protocol-47 loss can be told apart
+  from a bad datacenter route or an MTU black hole.
+- **Foreign Setup pre-fill.** The one-click Foreign installer shows the linked
+  tunnel's `MTU` / `MSS` / `TXQ`, the raw-speed state and the effective
+  `proxyBindAddr` with a public/unreachable verdict before generating the
+  script.
+
+### Changed
+
+- **Full persisted zero-drop tuning** in `frp-gre`, `frp-turbo` and
+  `FRP_FOREIGN_SETUP` (`/etc/sysctl.d/99-tunnel-turbo.conf`): fq + BBR,
+  16 MB `rmem/wmem`, `tcp_rmem`/`tcp_wmem` to 16 MB, `netdev_max_backlog=16384`,
+  `somaxconn=65535`, `tcp_max_syn_backlog=16384`,
+  `tcp_slow_start_after_idle=0`, `tcp_mtu_probing=1`, `tcp_base_mss=1024`,
+  `tcp_notsent_lowat=16384`, `ip_local_port_range=10240 65535`,
+  `rp_filter=0` (all/default/interface) and `nf_conntrack_max=524288` only when
+  conntrack is loaded. BBR is loaded now and at boot via `modules-load.d`.
+- frpc warm pool raised `poolCount 10 → 15` (still `heartbeat 15/45`,
+  `dial 10/30`, `loginFailExit=false`).
+- `frps@`, `frpc@` and `gre-tunnel@` restart faster: `RestartSec=3s → 2s`
+  (still `Restart=always`, `StartLimitIntervalSec=0`, `LimitNOFILE=1048576`).
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`,
+  `scripts/check-sync.sh`, and `bash -n` on the generated
+  `FRP_FOREIGN_SETUP` payload.
+- New regression tests: `TestGREUpdate` and the expanded `TestGRELinkTest`
+  (MTU probe + three check blocks).
+
 ## v1.2.6 — production fixes + GRE/FRP anti-disconnect hardening
 
 ### Fixed

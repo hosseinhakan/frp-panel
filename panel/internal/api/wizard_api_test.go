@@ -236,7 +236,7 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		`remotePort = {{ $v.Second }}`,
 		`transport.dialServerTimeout = 10`,
 		`transport.dialServerKeepalive = 30`,
-		`transport.poolCount = 10`,
+		`transport.poolCount = 15`,
 		`transport.heartbeatInterval = 15`,
 		`transport.heartbeatTimeout = 45`,
 	} {
@@ -387,6 +387,7 @@ func seedWizardTunnel(t *testing.T, e *testEnv, iface, localPub, remotePub, octe
 		RemotePrivateIP: "10.100." + octet + ".1/30",
 		MTU:             1320,
 		MSSMode:         "1220",
+		TXQueuelen:      1000,
 	}); err != nil {
 		t.Fatal(err)
 	}

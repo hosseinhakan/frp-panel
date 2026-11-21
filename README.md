@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.6 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.7 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 
@@ -69,8 +69,11 @@ IP**, at the same forwarded port.
    `/30` subnet and control port (`gt11` / `10.100.111.0/30` / `7025` on a
    fresh host). The wizard creates:
    - a GRE tunnel with the selected `/30` (`…2/30 ↔ …1/30`), MTU `1320`,
-     `NOTRACK` for proto 47 and TCPMSS clamping (local SYN MSS pinned to
-     `1220` so PMTUD black holes cannot stall the control channel);
+     `txqueuelen 1000`, `NOTRACK` for proto 47 and TCPMSS clamping (local SYN
+     MSS pinned to `1220` so PMTUD black holes cannot stall the control
+     channel), plus a persisted zero-drop `sysctl.d` profile (BBR + fq, 16 MB
+     buffers, deep backlogs, `rp_filter=0`, `tcp_mtu_probing`, `nf_conntrack`);
+     every field is editable from the GRE row after creation;
    - a 32-char token (or your own custom token) and an `frps` instance bound to
      the tunnel IP by default — `::` and `0.0.0.0` are selectable in the form —
      while `proxyBindAddr` keeps the forwarded user ports public; then enables
@@ -97,7 +100,7 @@ IP**, at the same forwarded port.
    without touching the mirrored `/30`) and an `frpc` instance. Generated
    configs use the proven `mikeesierrah` profile: `tls.enable = false`,
    per-proxy `useEncryption = false`, compression off, compact
-   `parseNumberRangePair` port templates, `dial 10s / keepalive 30s / pool 10`
+   `parseNumberRangePair` port templates, `dial 10s / keepalive 30s / pool 15`
    and `heartbeat 15s / timeout 45s`. It then pings the Iran tunnel IP and
    reports the frpc unit state, and allocates the loopback metrics `webServer`
    port the watchdog uses for proxy health.
@@ -146,7 +149,7 @@ Generated configs follow the proven `mikeesierrah/frp-script` profile with
 stability-tuned timers: frps `heartbeatTimeout=45`, `tcpKeepalive=30`,
 `maxPoolCount=65535`, `tcpMux=false`, and `proxyBindAddr=0.0.0.0` whenever
 `bindAddr` is a GRE IP; frpc `tls.enable=false`, per-proxy
-encryption/compression off, `dial 10/30`, `poolCount=10`, `heartbeat 15/45`,
+encryption/compression off, `dial 10/30`, `poolCount=15`, `heartbeat 15/45`,
 and compact `parseNumberRangePair` port templates. The Edit modal exposes every
 one of these fields (plus the QUIC block) and keeps both template and plain
 `[[proxies]]` configs editable.

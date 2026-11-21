@@ -160,6 +160,7 @@ set -euo pipefail
 ENV_DIR="${FRP_GRE_ENV_DIR:-/root/frp/gre}"
 HOLD_INTERVAL="${FRP_GRE_HOLD_INTERVAL:-10}"
 IPT_WAIT="${FRP_GRE_IPT_WAIT:-5}"
+TUNING_DROPIN="/etc/sysctl.d/99-tunnel-turbo.conf"
 
 usage() { echo "usage: frp-gre up|down|reload|hold|status <tunnel-name>" >&2; exit 2; }
 
@@ -170,7 +171,7 @@ load_env() {
     [[ -r "$env_file" ]] || { echo "frp-gre: missing env file $env_file" >&2; exit 1; }
 
     LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""
-    MTU=""; MSS_MODE="clamp"
+    MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$env_file"
 
@@ -179,6 +180,8 @@ load_env() {
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
     MTU="${MTU:-1320}"
     MSS_MODE="${MSS_MODE:-clamp}"
+    TXQUEUELEN="${TXQUEUELEN:-1000}"
+    [[ "$TXQUEUELEN" =~ ^[0-9]+$ ]] || TXQUEUELEN=1000
 }
 
 ipt() { iptables -w "$IPT_WAIT" "$@"; }
@@ -255,12 +258,58 @@ forward_purge() {
     ipt_purge filter FORWARD -o "$IFACE" -j ACCEPT
 }
 
-disable_rp_filter() { # never let reverse GRE packets be dropped by rp_filter
-    local key
-    for key in net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
-               "net.ipv4.conf.${IFACE}.rp_filter" \
+apply_tuning() { # zero-drop kernel tuning + per-interface rp_filter
+    local tmp="$TUNING_DROPIN.tmp"
+    mkdir -p /etc/sysctl.d
+    cat > "$tmp" <<'FRP_TUNING'
+# /etc/sysctl.d/99-tunnel-turbo.conf — FRP Tunnel Suite zero-drop tuning
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_tw_reuse = 1
+FRP_TUNING
+    # Only persist the conntrack key when the table is loaded: an unknown key
+    # would make every later `sysctl --system` fail on hosts without it.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        echo "net.netfilter.nf_conntrack_max = 524288" >> "$tmp"
+    fi
+    if [[ ! -f "$TUNING_DROPIN" ]] || ! cmp -s "$tmp" "$TUNING_DROPIN"; then
+        mv -f "$tmp" "$TUNING_DROPIN"
+        sysctl --system >/dev/null 2>&1 || true
+    else
+        rm -f "$tmp"
+    fi
+    # BBR is a module on most kernels: make it load now and at every boot so
+    # the congestion-control key above never fails silently after a reboot.
+    mkdir -p /etc/modules-load.d
+    echo tcp_bbr > /etc/modules-load.d/bbr.conf
+    modprobe tcp_bbr 2>/dev/null || true
+    # Never let reverse GRE packets be dropped by rp_filter, even when the
+    # drop-in could not be applied at boot time.
+    local key want
+    for key in "net.ipv4.conf.${IFACE}.rp_filter" net.ipv4.conf.all.rp_filter \
                net.ipv4.tcp_mtu_probing net.ipv4.tcp_base_mss; do
-        local want=0
+        want=0
         case "$key" in
             *.tcp_mtu_probing) want=1 ;;
             *.tcp_base_mss) want=1024 ;;
@@ -297,12 +346,13 @@ cmd_up() {
     fi
     ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
     ip link set dev "$IFACE" mtu "$MTU" up
-    disable_rp_filter
+    ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
+    apply_tuning
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
     mss_rules
     forward_rules
-    echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE"
+    echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  txq=$TXQUEUELEN"
 }
 
 cmd_hold() { # long-running keeper used by gre-tunnel@.service (Type=simple)
@@ -341,7 +391,7 @@ cmd_status() {
     tx_b=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     rx_p=$(cat "/sys/class/net/$IFACE/statistics/rx_packets" 2>/dev/null || echo 0)
     tx_p=$(cat "/sys/class/net/$IFACE/statistics/tx_packets" 2>/dev/null || echo 0)
-    echo "frp-gre: $IFACE UP — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  rx=${rx_p}p/${rx_b}B  tx=${tx_p}p/${tx_b}B"
+    echo "frp-gre: $IFACE UP — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  txq=$TXQUEUELEN  rx=${rx_p}p/${rx_b}B  tx=${tx_p}p/${tx_b}B"
 }
 
 case "${1:-}" in
@@ -370,7 +420,7 @@ ExecStart=/usr/local/bin/frp-gre hold %i
 ExecReload=/usr/local/bin/frp-gre reload %i
 ExecStop=/usr/local/bin/frp-gre down %i
 Restart=always
-RestartSec=3s
+RestartSec=2s
 Nice=-10
 OOMScoreAdjust=-900
 LimitNOFILE=1048576
@@ -415,20 +465,26 @@ usage() {
 write_dropin() {
     mkdir -p /etc/sysctl.d
     cat > "$SYSCTL_DROPIN" <<'TURBO_SYSCTL'
-# /etc/sysctl.d/99-tunnel-turbo.conf — applied by frp-turbo (FRP Tunnel Suite)
+# /etc/sysctl.d/99-tunnel-turbo.conf — FRP Tunnel Suite zero-drop tuning
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_base_mss = 1024
-net.core.rmem_max = 33554432
-net.core.wmem_max = 33554432
-net.ipv4.tcp_rmem = 4096 87380 33554432
-net.ipv4.tcp_wmem = 4096 65536 33554432
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.netdev_max_backlog = 16384
 net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
@@ -440,7 +496,7 @@ TURBO_SYSCTL
     # an unknown key into the drop-in would make every later `sysctl --system`
     # fail on hosts that do not load nf_conntrack.
     if [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
-        echo "net.netfilter.nf_conntrack_max = 1048576" >> "$SYSCTL_DROPIN"
+        echo "net.netfilter.nf_conntrack_max = 524288" >> "$SYSCTL_DROPIN"
     fi
 }
 
@@ -1184,7 +1240,7 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_BIND_SERVICE CAP_SYS_PTRAC
 ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
-RestartSec=3s
+RestartSec=2s
 Nice=-10
 OOMScoreAdjust=-900
 LimitNOFILE=1048576
@@ -1209,7 +1265,7 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_SYS_BIND_SERVIC
 ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
-RestartSec=3s
+RestartSec=2s
 Nice=-10
 OOMScoreAdjust=-900
 LimitNOFILE=1048576
@@ -1560,7 +1616,7 @@ transport.tcpMux = $mux
 transport.tcpMuxKeepaliveInterval = 10
 transport.dialServerTimeout = 10
 transport.dialServerKeepalive = 30
-transport.poolCount = 10
+transport.poolCount = 15
 transport.heartbeatInterval = 15
 transport.heartbeatTimeout = 45
 transport.tls.enable = $tls_enabled
@@ -1610,7 +1666,7 @@ EOF
             echo "transport.tcpMuxKeepaliveInterval = 10"
             echo "transport.dialServerTimeout = 10"
             echo "transport.dialServerKeepalive = 30"
-            echo "transport.poolCount = 10"
+            echo "transport.poolCount = 15"
             echo "transport.heartbeatInterval = 15"
             echo "transport.heartbeatTimeout = 45"
             echo "transport.tls.enable = $tls_enabled"
@@ -2018,9 +2074,9 @@ gre_list() {
     done
 }
 
-# gre_create_do LP RP IFACE LPRIV RPRIV MTU MSS — shared by menu + CLI
+# gre_create_do LP RP IFACE LPRIV RPRIV MTU MSS [TXQUEUELEN] — shared by menu + CLI
 gre_create_do() {
-    local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7"
+    local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7" txq="${8:-1000}"
 
     if ! is_ipv4 "$lp"; then print_error "Invalid local public IP: $lp"; return 1; fi
     if ! is_ipv4 "$rp"; then print_error "Invalid remote public IP: $rp"; return 1; fi
@@ -2031,6 +2087,9 @@ gre_create_do() {
     if ! [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then print_error "Invalid interface name: $iface"; return 1; fi
     if ! [[ "$mtu" =~ ^[0-9]+$ ]] || (( mtu < 576 || mtu > 1500 )); then
         print_error "Invalid MTU: $mtu"; return 1
+    fi
+    if ! [[ "$txq" =~ ^[0-9]+$ ]] || (( txq < 1 || txq > 100000 )); then
+        print_error "Invalid TXQUEUELEN: $txq"; return 1
     fi
     case "$mss" in
         clamp|1360|1240|1220|off) ;;
@@ -2060,6 +2119,7 @@ gre_create_do() {
         echo "REMOTE_PRIVATE_IP=$rpriv"
         echo "MTU=$mtu"
         echo "MSS_MODE=$mss"
+        echo "TXQUEUELEN=$txq"
     } > "$GRE_DIR/$iface.env"
     chmod 600 "$GRE_DIR/$iface.env"
 
@@ -2082,7 +2142,7 @@ gre_create_do() {
 
 gre_create_prompt() {
     print_info "GRE Tunnel Creation"
-    local def_pub lp rp iface lpriv rpriv mtu mss
+    local def_pub lp rp iface lpriv rpriv mtu mss txq
     def_pub=$(detect_public_ip)
     read -p "Local public IP${def_pub:+ [$def_pub]}: " lp
     lp=${lp:-$def_pub}
@@ -2095,6 +2155,8 @@ gre_create_prompt() {
     rpriv=${rpriv:-"10.100.111.2/30"}
     read -p "MTU [1320]: " mtu
     mtu=${mtu:-1320}
+    read -p "TX queue length (txqueuelen) [1000]: " txq
+    txq=${txq:-1000}
     echo "TCP MSS clamping mode:"
     echo "  1) clamp  (auto, recommended)"
     echo "  2) 1360    (explicit)"
@@ -2106,7 +2168,7 @@ gre_create_prompt() {
         2) mss="1360" ;; 3) mss="1240" ;; 4) mss="1220" ;; 5) mss="off" ;; 1|"") mss="clamp" ;;
         *) mss="clamp" ;;
     esac
-    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss"
+    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" "$txq"
 }
 
 gre_delete_do() {
@@ -2145,7 +2207,7 @@ gre_mirror_print() {
         print_error "No tunnel named '$name' ($GRE_DIR/$name.env missing)."
         return 1
     fi
-    LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""; MTU=""; MSS_MODE="clamp"
+    LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""; MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$GRE_DIR/$name.env"
     cat <<EOF
@@ -2158,7 +2220,8 @@ frp-manager gre create \\
   --local-private "$REMOTE_PRIVATE_IP" \\
   --remote-private "$LOCAL_PRIVATE_IP" \\
   --mtu "${MTU:-1320}" \\
-  --mss "${MSS_MODE:-clamp}"
+  --mss "${MSS_MODE:-clamp}" \\
+  --txqueuelen "${TXQUEUELEN:-1000}"
 
 # Equivalent env file ($GRE_DIR/$IFACE.env):
 LOCAL_PUBLIC_IP=$REMOTE_PUBLIC_IP
@@ -2168,6 +2231,7 @@ LOCAL_PRIVATE_IP=$REMOTE_PRIVATE_IP
 REMOTE_PRIVATE_IP=$LOCAL_PRIVATE_IP
 MTU=${MTU:-1320}
 MSS_MODE=${MSS_MODE:-clamp}
+TXQUEUELEN=${TXQUEUELEN:-1000}
 EOF
 }
 
@@ -2177,7 +2241,7 @@ reverse_print_flow() {
     echo "User ──► Iran Public IP:<port> ──► frps (Iran) ──► GRE gtNN ──► frpc (Foreign) ──► Foreign 127.0.0.1:<port>"
 }
 
-reverse_payload_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN
+reverse_payload_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN [TXQUEUELEN]
     cat <<EOF
 # FRP Tunnel Suite — FRP over GRE Reverse mirror (paste on the FOREIGN / exit node)
 # Flow: User -> Iran Public IP:<port> -> frps (Iran) -> GRE gt11 -> frpc (Foreign) -> 127.0.0.1:<port>
@@ -2188,6 +2252,7 @@ LOCAL_PRIVATE_IP=$4
 REMOTE_PRIVATE_IP=$5
 MTU=$6
 MSS_MODE=$7
+TXQUEUELEN=${12:-1000}
 SERVER_ADDR=$8
 CONTROL_PORT=$9
 PROTOCOL=${10}
@@ -2195,7 +2260,7 @@ TOKEN=${11}
 EOF
 }
 
-reverse_cmd_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN
+reverse_cmd_print() { # LP RP IFACE LPRIV RPRIV MTU MSS SERVERADDR PORT PROTO TOKEN [TXQUEUELEN]
     cat <<EOF
 frp-manager reverse foreign \\
   --local-public "$1" \\
@@ -2205,6 +2270,7 @@ frp-manager reverse foreign \\
   --remote-private "$5" \\
   --mtu "$6" \\
   --mss "$7" \\
+  --txqueuelen "${12:-1000}" \\
   --server-addr "$8" \\
   --control-port "$9" \\
   --protocol "${10}" \\
@@ -2216,7 +2282,7 @@ EOF
 reverse_parse_payload() { # file-or-stdin; sets RP_* globals
     local src="$1" line key val
     RP_IFACE=""; RP_LOCAL_PUBLIC_IP=""; RP_REMOTE_PUBLIC_IP=""; RP_LOCAL_PRIVATE_IP=""
-    RP_REMOTE_PRIVATE_IP=""; RP_MTU=""; RP_MSS_MODE=""; RP_SERVER_ADDR=""
+    RP_REMOTE_PRIVATE_IP=""; RP_MTU=""; RP_MSS_MODE=""; RP_TXQUEUELEN=""; RP_SERVER_ADDR=""
     RP_CONTROL_PORT=""; RP_PROTOCOL=""; RP_TOKEN=""
     [[ "$src" == "-" ]] && src="/dev/stdin"
     if [[ ! -r "$src" ]]; then
@@ -2239,6 +2305,7 @@ reverse_parse_payload() { # file-or-stdin; sets RP_* globals
             REMOTE_PRIVATE_IP) RP_REMOTE_PRIVATE_IP="$val" ;;
             MTU) RP_MTU="$val" ;;
             MSS_MODE) RP_MSS_MODE="$val" ;;
+            TXQUEUELEN) RP_TXQUEUELEN="$val" ;;
             SERVER_ADDR) RP_SERVER_ADDR="$val" ;;
             CONTROL_PORT) RP_CONTROL_PORT="$val" ;;
             PROTOCOL) RP_PROTOCOL="$val" ;;
@@ -2478,9 +2545,9 @@ reverse_port_busy() { # reverse_port_busy <port>
     return 1
 }
 
-# reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS]
+# reverse_iran_do IRAN_PUBLIC FOREIGN_PUBLIC [IFACE] [PORT] [PROTO] [MSS] [TXQUEUELEN]
 reverse_iran_do() {
-    local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}"
+    local iran="$1" foreign="$2" iface="${3:-gt11}" port="${4:-7025}" proto="${5:-tcp}" mss="${6:-1220}" txq="${7:-1000}"
     if [[ ! -x /usr/local/bin/frps ]]; then
         print_error "frps is not installed — run menu 1 (Install FRP) first."
         return 1
@@ -2534,7 +2601,7 @@ reverse_iran_do() {
     fi
 
     print_info "Creating GRE $iface: Iran $iran (10.100.$req_octet.2/30) ↔ Foreign $foreign (10.100.$req_octet.1/30)"
-    gre_create_do "$iran" "$foreign" "$iface" "10.100.$req_octet.2/30" "10.100.$req_octet.1/30" 1320 "$mss" || return 1
+    gre_create_do "$iran" "$foreign" "$iface" "10.100.$req_octet.2/30" "10.100.$req_octet.1/30" 1320 "$mss" "$txq" || return 1
 
     local token cfg tmp server_addr
     server_addr="10.100.$req_octet.2"
@@ -2602,10 +2669,10 @@ reverse_iran_do() {
     reverse_print_flow
     echo
     print_info "Mirror payload — paste this on the Foreign node:"
-    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token"
+    reverse_payload_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq"
     echo
     print_info "Or run this on the Foreign node (add the ports it should expose):"
-    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token"
+    reverse_cmd_print "$foreign" "$iran" "$iface" "10.100.$req_octet.1/30" "10.100.$req_octet.2/30" 1320 "$mss" "$server_addr" "$port" "$proto" "$token" "$txq"
     echo
     print_warning "Token (the Foreign frpc must use the same): $token"
 }
@@ -2614,7 +2681,7 @@ reverse_iran_do() {
 reverse_foreign_do() {
     local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7"
     local server_addr="$8" port="$9" token="${10}" ports="${11}" protoname="${12}"
-    local proto_mode="${13:-both}" localip="${14:-127.0.0.1}"
+    local proto_mode="${13:-both}" localip="${14:-127.0.0.1}" txq="${15:-1000}"
     if [[ ! -x /usr/local/bin/frpc ]]; then
         print_error "frpc is not installed — run menu 1 (Install FRP) first."
         return 1
@@ -2671,7 +2738,7 @@ reverse_foreign_do() {
     [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
 
     print_info "Creating GRE $iface: Foreign $lp ($lpriv) ↔ Iran $rp ($rpriv)"
-    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" || return 1
+    gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" "$txq" || return 1
     cfg="$CLIENT_DIR/client-$port.toml"
     tmp="$cfg.new"
     web_port="$(allocate_web_port 7400 7499 "$CLIENT_DIR" 2>/dev/null || true)"
@@ -2698,7 +2765,7 @@ reverse_foreign_do() {
         echo "transport.tcpMuxKeepaliveInterval = 10"
         echo "transport.dialServerTimeout = 10"
         echo "transport.dialServerKeepalive = 30"
-        echo "transport.poolCount = 10"
+        echo "transport.poolCount = 15"
         echo "transport.heartbeatInterval = 15"
         echo "transport.heartbeatTimeout = 45"
         echo "transport.tls.enable = false"
@@ -2799,7 +2866,7 @@ reverse_iran_prompt() {
 
 reverse_foreign_prompt() {
     local def_pub lp rp port token protoname proto_mode ports localip payload_choice payload_file
-    local iface lpriv rpriv mtu mss server_addr
+    local iface lpriv rpriv mtu mss server_addr txq
     echo "Do you have a mirror payload from the Iran node?"
     echo "  1) Yes — read it from a file"
     echo "  2) No — enter the values manually"
@@ -2811,6 +2878,7 @@ reverse_foreign_prompt() {
         iface="${RP_IFACE:-gt11}"; lpriv="${RP_LOCAL_PRIVATE_IP:-10.100.111.1/30}"
         rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"; mtu="${RP_MTU:-1320}"
         mss="${RP_MSS_MODE:-1220}"; server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
+        txq="${RP_TXQUEUELEN:-1000}"
         port="${RP_CONTROL_PORT:-7025}"; token="$RP_TOKEN"; protoname="${RP_PROTOCOL:-tcp}"
     else
         def_pub=$(detect_public_ip)
@@ -2818,7 +2886,7 @@ reverse_foreign_prompt() {
         lp=${lp:-$def_pub}
         read -p "Iran public IP: " rp
         iface="$(reverse_next_iface)"; lpriv="10.100.111.1/30"; rpriv="10.100.111.2/30"
-        mtu="1320"; mss="1220"; server_addr="10.100.111.2"
+        mtu="1320"; mss="1220"; server_addr="10.100.111.2"; txq="1000"
         read -p "Tunnel control port [7025]: " port
         port=${port:-7025}
         read -p "Auth token (from the Iran node): " token
@@ -2833,7 +2901,7 @@ reverse_foreign_prompt() {
     read -p "Local IP on this node [127.0.0.1]: " localip
     localip=${localip:-127.0.0.1}
     reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
-        "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip"
+        "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq"
 }
 
 reverse_menu() {
@@ -2869,7 +2937,7 @@ reverse_cli() {
     shift || true
     case "$action" in
         iran)
-            local iran="" foreign="" iface="gt11" port="7025" proto="tcp" mss="1220"
+            local iran="" foreign="" iface="gt11" port="7025" proto="tcp" mss="1220" txq="1000"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --iran-public) iran="$2"; shift 2 ;;
@@ -2878,14 +2946,15 @@ reverse_cli() {
                     --port|--control-port) port="$2"; shift 2 ;;
                     --protocol) proto="$2"; shift 2 ;;
                     --mss) mss="$2"; shift 2 ;;
+                    --txqueuelen) txq="$2"; shift 2 ;;
                     --no-watchdog) REVERSE_NO_WATCHDOG=1; shift ;;
                     *) print_error "unknown flag: $1"; exit 1 ;;
                 esac
             done
-            reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss"
+            reverse_iran_do "$iran" "$foreign" "$iface" "$port" "$proto" "$mss" "$txq"
             ;;
         foreign)
-            local payload="" lp="" rp="" iface="" lpriv="" rpriv="" mtu="" mss=""
+            local payload="" lp="" rp="" iface="" lpriv="" rpriv="" mtu="" mss="" txq=""
             local server_addr="" port="" token="" ports="" protoname="" proto_mode="both" localip="127.0.0.1"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -2897,6 +2966,7 @@ reverse_cli() {
                     --remote-private) rpriv="$2"; shift 2 ;;
                     --mtu) mtu="$2"; shift 2 ;;
                     --mss) mss="$2"; shift 2 ;;
+                    --txqueuelen) txq="$2"; shift 2 ;;
                     --server-addr) server_addr="$2"; shift 2 ;;
                     --control-port|--port) port="$2"; shift 2 ;;
                     --token) token="$2"; shift 2 ;;
@@ -2917,6 +2987,7 @@ reverse_cli() {
                 [[ -z "$rpriv" ]] && rpriv="${RP_REMOTE_PRIVATE_IP:-10.100.111.2/30}"
                 [[ -z "$mtu" ]] && mtu="${RP_MTU:-1320}"
                 [[ -z "$mss" ]] && mss="${RP_MSS_MODE:-1220}"
+                [[ -z "$txq" ]] && txq="${RP_TXQUEUELEN:-1000}"
                 [[ -z "$server_addr" ]] && server_addr="${RP_SERVER_ADDR:-10.100.111.2}"
                 [[ -z "$port" ]] && port="${RP_CONTROL_PORT:-7025}"
                 [[ -z "$token" ]] && token="$RP_TOKEN"
@@ -2927,6 +2998,7 @@ reverse_cli() {
             [[ -z "$rpriv" ]] && rpriv="10.100.111.2/30"
             [[ -z "$mtu" ]] && mtu="1320"
             [[ -z "$mss" ]] && mss="1220"
+            [[ -z "$txq" ]] && txq="1000"
             [[ -z "$server_addr" ]] && server_addr="10.100.111.2"
             [[ -z "$port" ]] && port="7025"
             [[ -z "$protoname" ]] && protoname="tcp"
@@ -2935,7 +3007,7 @@ reverse_cli() {
                 exit 1
             fi
             reverse_foreign_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" \
-                "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip"
+                "$server_addr" "$port" "$token" "$ports" "$protoname" "$proto_mode" "$localip" "$txq"
             ;;
         *)
             print_error "usage: frp-manager reverse iran|foreign ..."
@@ -3647,12 +3719,12 @@ Subcommands (non-interactive):
   frp-manager gre create --local-public IP --remote-public IP
                           [--iface gt11] [--local-private 10.100.111.1/30]
                           [--remote-private 10.100.111.2/30] [--mtu 1320]
-                          [--mss clamp|1360|1240|1220|off]
+                          [--mss clamp|1360|1240|1220|off] [--txqueuelen 1000]
   frp-manager gre delete <name>
   frp-manager gre mirror <name>
   frp-manager reverse iran --iran-public IP --foreign-public IP
                            [--iface gt11] [--control-port 7025]
-                           [--protocol tcp|quic|kcp] [--mss 1220] [--no-watchdog]
+                           [--protocol tcp|quic|kcp] [--mss 1220] [--txqueuelen 1000] [--no-watchdog]
                            (busy iface/subnet/port auto-allocate the next free value)
   frp-manager reverse foreign --payload FILE|- --ports 8443,2053,443
                            [--proto both|tcp|udp] [--local-ip 127.0.0.1] [--no-watchdog]
@@ -3713,7 +3785,7 @@ gre_cli() {
     case "$action" in
         list) gre_list ;;
         create)
-            local lp="" rp="" iface="gt11" lpriv="10.100.111.1/30" rpriv="10.100.111.2/30" mtu="1320" mss="clamp"
+            local lp="" rp="" iface="gt11" lpriv="10.100.111.1/30" rpriv="10.100.111.2/30" mtu="1320" mss="clamp" txq="1000"
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --local-public) lp="$2"; shift 2 ;;
@@ -3723,10 +3795,11 @@ gre_cli() {
                     --remote-private) rpriv="$2"; shift 2 ;;
                     --mtu) mtu="$2"; shift 2 ;;
                     --mss) mss="$2"; shift 2 ;;
+                    --txqueuelen) txq="$2"; shift 2 ;;
                     *) print_error "unknown flag: $1"; exit 1 ;;
                 esac
             done
-            gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss"
+            gre_create_do "$lp" "$rp" "$iface" "$lpriv" "$rpriv" "$mtu" "$mss" "$txq"
             ;;
         delete)
             [[ -n "${1:-}" ]] || { print_error "usage: frp-manager gre delete <name>"; exit 1; }

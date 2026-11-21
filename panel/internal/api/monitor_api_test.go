@@ -24,7 +24,7 @@ func seedProbeState(t *testing.T, e *testEnv) {
 	tunnel := gre.Tunnel{
 		Name: "gt11", LocalPublicIP: "1.2.3.4", RemotePublicIP: "5.6.7.8", Iface: "gt11",
 		LocalPrivateIP: "10.100.111.1/30", RemotePrivateIP: "10.100.111.2/30",
-		MTU: 1320, MSSMode: "clamp",
+		MTU: 1320, MSSMode: "clamp", TXQueuelen: 1000,
 	}
 	if err := gre.Write(e.srv.paths.GREDir, tunnel); err != nil {
 		t.Fatal(err)
@@ -275,12 +275,12 @@ func TestLogStreamValidation(t *testing.T) {
 		url  string
 		code int
 	}{
-		{"/api/logs/stream", http.StatusBadRequest},                                   // no unit
-		{"/api/logs/stream?unit=sshd", http.StatusBadRequest},                          // not a suite unit
-		{"/api/logs/stream?unit=frps@ghost", http.StatusNotFound},                     // no config file
-		{"/api/logs/stream?unit=gre-tunnel@gt11&lines=0", http.StatusBadRequest},      // bad lines
-		{"/api/logs/stream?unit=gre-tunnel@gt11&lines=99999", http.StatusBadRequest},  // over cap
-		{"/api/logs/stream?unit=gre-tunnel@gt11&since=10+minutes+ago", http.StatusBadRequest}, // free-form journalctl expression
+		{"/api/logs/stream", http.StatusBadRequest},                                               // no unit
+		{"/api/logs/stream?unit=sshd", http.StatusBadRequest},                                     // not a suite unit
+		{"/api/logs/stream?unit=frps@ghost", http.StatusNotFound},                                 // no config file
+		{"/api/logs/stream?unit=gre-tunnel@gt11&lines=0", http.StatusBadRequest},                  // bad lines
+		{"/api/logs/stream?unit=gre-tunnel@gt11&lines=99999", http.StatusBadRequest},              // over cap
+		{"/api/logs/stream?unit=gre-tunnel@gt11&since=10+minutes+ago", http.StatusBadRequest},     // free-form journalctl expression
 		{"/api/logs/stream?unit=gre-tunnel@gt11&since=2026-11-20T10:00:00Z", http.StatusConflict}, // journalctl not available in tests
 	}
 	for _, c := range cases {

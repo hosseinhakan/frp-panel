@@ -51,7 +51,7 @@ func TestGRECreateWritesCLIByteIdenticalEnv(t *testing.T) {
 	want := gre.RenderEnv(gre.Tunnel{
 		Name: "gt11", LocalPublicIP: "1.2.3.4", RemotePublicIP: "5.6.7.8", Iface: "gt11",
 		LocalPrivateIP: "10.100.111.1/30", RemotePrivateIP: "10.100.111.2/30",
-		MTU: 1320, MSSMode: "clamp",
+		MTU: 1320, MSSMode: "clamp", TXQueuelen: 1000,
 	})
 	if string(raw) != want {
 		t.Errorf("env drift vs CLI:\n--- want ---\n%s\n--- got ---\n%s", want, raw)
@@ -202,7 +202,8 @@ frp-manager gre create \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
   --mtu 1320 \
-  --mss clamp
+  --mss clamp \
+  --txqueuelen 1000
 
 # Equivalent env file (`
 	want += e.srv.paths.GREDir + "/gt11.env" + `):
@@ -213,6 +214,7 @@ LOCAL_PRIVATE_IP=10.100.111.2/30
 REMOTE_PRIVATE_IP=10.100.111.1/30
 MTU=1320
 MSS_MODE=clamp
+TXQUEUELEN=1000
 `
 	if envText != want {
 		t.Errorf("mirror text drift vs CLI:\n--- want ---\n%s\n--- got ---\n%s", want, envText)
@@ -225,7 +227,9 @@ func TestGRELinkTest(t *testing.T) {
 	if rec := e.authorized(http.MethodPost, "/api/gre", body); rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d", rec.Code)
 	}
-	e.runner.execOut["ping -c 3 -W 2 -I gt11 10.100.111.2"] = pingOut
+	e.runner.execOut["ping -c 10 -i 0.2 -W 1 -I gt11 10.100.111.2"] = pingOut
+	e.runner.execOut["ping -M do"] = pingOut
+	e.runner.execOut["ping -c 5 -W 2 5.6.7.8"] = pingOut
 
 	rec := e.authorized(http.MethodPost, "/api/gre/gt11/test", "")
 	if rec.Code != http.StatusOK {
@@ -241,6 +245,18 @@ func TestGRELinkTest(t *testing.T) {
 	if loss, _ := resp["loss_pct"].(float64); loss != 0 {
 		t.Errorf("loss_pct = %v", resp["loss_pct"])
 	}
+	if resp["mtu_probe_ok"] != true {
+		t.Errorf("mtu_probe_ok = %v, want true", resp["mtu_probe_ok"])
+	}
+	if resp["mtu_probe_size"] != float64(1292) {
+		t.Errorf("mtu_probe_size = %v, want 1292", resp["mtu_probe_size"])
+	}
+	checks, _ := resp["checks"].(map[string]any)
+	for _, key := range []string{"gre", "mtu", "public"} {
+		if _, ok := checks[key].(map[string]any); !ok {
+			t.Errorf("checks[%q] missing: %v", key, checks)
+		}
+	}
 
 	// Unreachable tunnel still returns 200 with reachable=false.
 	e.runner.execOut = map[string]string{}
@@ -251,6 +267,60 @@ func TestGRELinkTest(t *testing.T) {
 	}
 	if jsonMap(t, rec)["reachable"] != false {
 		t.Errorf("reachable = %v, want false", jsonMap(t, rec)["reachable"])
+	}
+}
+
+func TestGREUpdate(t *testing.T) {
+	e := newTestEnv(t)
+	body := `{"name":"gt11","localPublicIp":"1.2.3.4","remotePublicIp":"5.6.7.8"}`
+	if rec := e.authorized(http.MethodPost, "/api/gre", body); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+
+	upd := `{"localPublicIp":"1.2.3.5","remotePublicIp":"5.6.7.9","mtu":1300,` +
+		`"mssMode":"1220","txqueuelen":2000,"restart":true}`
+	rec := e.authorized(http.MethodPut, "/api/gre/gt11", upd)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tun, _ := resp["tunnel"].(map[string]any)
+	if tun == nil {
+		t.Fatalf("no tunnel in update response: %v", resp)
+	}
+	if tun["local_public_ip"] != "1.2.3.5" || tun["remote_public_ip"] != "5.6.7.9" {
+		t.Errorf("endpoints not updated: %v", tun)
+	}
+	if tun["mtu"] != float64(1300) || tun["mss_mode"] != "1220" || tun["txqueuelen"] != float64(2000) {
+		t.Errorf("tuning not updated: %v", tun)
+	}
+	if resp["restarted"] != true {
+		t.Errorf("restarted = %v, want true", resp["restarted"])
+	}
+	if !e.runner.called("systemctl:restart gre-tunnel@gt11") {
+		t.Error("unit not restarted after update")
+	}
+
+	parsed, err := gre.Read(e.srv.paths.GREDir, "gt11")
+	if err != nil {
+		t.Fatalf("updated env unreadable: %v", err)
+	}
+	if parsed.MTU != 1300 || parsed.TXQueuelen != 2000 || parsed.LocalPublicIP != "1.2.3.5" {
+		t.Errorf("persisted tunnel = %+v", parsed)
+	}
+
+	// restart=false saves without touching the unit.
+	rec = e.authorized(http.MethodPut, "/api/gre/gt11", `{"mtu":1400,"restart":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deferred update = %d: %s", rec.Code, rec.Body.String())
+	}
+	if jsonMap(t, rec)["restarted"] != false {
+		t.Errorf("deferred restart flag wrong: %v", jsonMap(t, rec))
+	}
+
+	// Unknown tunnel → 404.
+	if rec := e.authorized(http.MethodPut, "/api/gre/nope", `{"mtu":1400}`); rec.Code != http.StatusNotFound {
+		t.Errorf("update missing = %d, want 404", rec.Code)
 	}
 }
 

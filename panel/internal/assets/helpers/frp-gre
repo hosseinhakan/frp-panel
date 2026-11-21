@@ -15,6 +15,7 @@ set -euo pipefail
 ENV_DIR="${FRP_GRE_ENV_DIR:-/root/frp/gre}"
 HOLD_INTERVAL="${FRP_GRE_HOLD_INTERVAL:-10}"
 IPT_WAIT="${FRP_GRE_IPT_WAIT:-5}"
+TUNING_DROPIN="/etc/sysctl.d/99-tunnel-turbo.conf"
 
 usage() { echo "usage: frp-gre up|down|reload|hold|status <tunnel-name>" >&2; exit 2; }
 
@@ -25,7 +26,7 @@ load_env() {
     [[ -r "$env_file" ]] || { echo "frp-gre: missing env file $env_file" >&2; exit 1; }
 
     LOCAL_PUBLIC_IP=""; REMOTE_PUBLIC_IP=""; IFACE=""; LOCAL_PRIVATE_IP=""; REMOTE_PRIVATE_IP=""
-    MTU=""; MSS_MODE="clamp"
+    MTU=""; MSS_MODE="clamp"; TXQUEUELEN=""
     # shellcheck disable=SC1090
     source "$env_file"
 
@@ -34,6 +35,8 @@ load_env() {
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
     MTU="${MTU:-1320}"
     MSS_MODE="${MSS_MODE:-clamp}"
+    TXQUEUELEN="${TXQUEUELEN:-1000}"
+    [[ "$TXQUEUELEN" =~ ^[0-9]+$ ]] || TXQUEUELEN=1000
 }
 
 ipt() { iptables -w "$IPT_WAIT" "$@"; }
@@ -110,12 +113,58 @@ forward_purge() {
     ipt_purge filter FORWARD -o "$IFACE" -j ACCEPT
 }
 
-disable_rp_filter() { # never let reverse GRE packets be dropped by rp_filter
-    local key
-    for key in net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
-               "net.ipv4.conf.${IFACE}.rp_filter" \
+apply_tuning() { # zero-drop kernel tuning + per-interface rp_filter
+    local tmp="$TUNING_DROPIN.tmp"
+    mkdir -p /etc/sysctl.d
+    cat > "$tmp" <<'FRP_TUNING'
+# /etc/sysctl.d/99-tunnel-turbo.conf — FRP Tunnel Suite zero-drop tuning
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_default = 262144
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1024
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_tw_reuse = 1
+FRP_TUNING
+    # Only persist the conntrack key when the table is loaded: an unknown key
+    # would make every later `sysctl --system` fail on hosts without it.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max ]]; then
+        echo "net.netfilter.nf_conntrack_max = 524288" >> "$tmp"
+    fi
+    if [[ ! -f "$TUNING_DROPIN" ]] || ! cmp -s "$tmp" "$TUNING_DROPIN"; then
+        mv -f "$tmp" "$TUNING_DROPIN"
+        sysctl --system >/dev/null 2>&1 || true
+    else
+        rm -f "$tmp"
+    fi
+    # BBR is a module on most kernels: make it load now and at every boot so
+    # the congestion-control key above never fails silently after a reboot.
+    mkdir -p /etc/modules-load.d
+    echo tcp_bbr > /etc/modules-load.d/bbr.conf
+    modprobe tcp_bbr 2>/dev/null || true
+    # Never let reverse GRE packets be dropped by rp_filter, even when the
+    # drop-in could not be applied at boot time.
+    local key want
+    for key in "net.ipv4.conf.${IFACE}.rp_filter" net.ipv4.conf.all.rp_filter \
                net.ipv4.tcp_mtu_probing net.ipv4.tcp_base_mss; do
-        local want=0
+        want=0
         case "$key" in
             *.tcp_mtu_probing) want=1 ;;
             *.tcp_base_mss) want=1024 ;;
@@ -152,12 +201,13 @@ cmd_up() {
     fi
     ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
     ip link set dev "$IFACE" mtu "$MTU" up
-    disable_rp_filter
+    ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
+    apply_tuning
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
     mss_rules
     forward_rules
-    echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE"
+    echo "frp-gre: $IFACE up — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  txq=$TXQUEUELEN"
 }
 
 cmd_hold() { # long-running keeper used by gre-tunnel@.service (Type=simple)
@@ -196,7 +246,7 @@ cmd_status() {
     tx_b=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     rx_p=$(cat "/sys/class/net/$IFACE/statistics/rx_packets" 2>/dev/null || echo 0)
     tx_p=$(cat "/sys/class/net/$IFACE/statistics/tx_packets" 2>/dev/null || echo 0)
-    echo "frp-gre: $IFACE UP — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  rx=${rx_p}p/${rx_b}B  tx=${tx_p}p/${tx_b}B"
+    echo "frp-gre: $IFACE UP — local $LOCAL_PRIVATE_IP  peer $REMOTE_PRIVATE_IP  mtu $MTU  mss=$MSS_MODE  txq=$TXQUEUELEN  rx=${rx_p}p/${rx_b}B  tx=${tx_p}p/${tx_b}B"
 }
 
 case "${1:-}" in

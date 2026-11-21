@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -60,7 +61,7 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		`name = "tcp-{{ $v.First }}"`,
 		"transport.dialServerTimeout = 10",
 		"transport.dialServerKeepalive = 30",
-		"transport.poolCount = 10",
+		"transport.poolCount = 15",
 		"transport.heartbeatInterval = 15",
 		"transport.heartbeatTimeout = 45",
 		// Anti-disconnect hardening: local SYN MSS, protocol-47 NOTRACK,
@@ -73,8 +74,8 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"ip -d tunnel show", // stale GRE with the same remote is removed first
 		"purge_remote_conflicts",
 		"/usr/local/bin/frpc",
-		"net.core.default_qdisc=fq", // BBR + fq tuning
-		"pkill -10 -x frpc",         // 3h GC cron
+		"net.core.default_qdisc = fq", // BBR + fq tuning
+		"pkill -10 -x frpc",           // 3h GC cron
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("foreign script missing %q:\n%s", want, script)
@@ -82,6 +83,16 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 	}
 	if strings.Contains(script, `name = "udp-`) {
 		t.Errorf("proto=tcp emitted UDP proxies:\n%s", script)
+	}
+
+	// The generated block must be valid bash (nested heredocs included). Skip
+	// on hosts without bash — Windows CI runners have Git Bash on PATH.
+	if bash, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("generated FRP_FOREIGN_SETUP has a syntax error: %v\n%s", err, out)
+		}
 	}
 }
 

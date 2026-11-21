@@ -19,6 +19,7 @@ func fixtureTunnel() Tunnel {
 		RemotePrivateIP: "10.100.111.2/30",
 		MTU:             1320,
 		MSSMode:         "clamp",
+		TXQueuelen:      1000,
 	}
 }
 
@@ -33,6 +34,7 @@ LOCAL_PRIVATE_IP=10.100.111.1/30
 REMOTE_PRIVATE_IP=10.100.111.2/30
 MTU=1320
 MSS_MODE=clamp
+TXQUEUELEN=1000
 `
 	if got := RenderEnv(fixtureTunnel()); got != want {
 		t.Errorf("RenderEnv mismatch:\n--- want ---\n%s\n--- got ---\n%s", want, got)
@@ -51,7 +53,8 @@ frp-manager gre create \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
   --mtu 1320 \
-  --mss clamp
+  --mss clamp \
+  --txqueuelen 1000
 
 # Equivalent env file (/root/frp/gre/gt11.env):
 LOCAL_PUBLIC_IP=5.6.7.8
@@ -61,6 +64,7 @@ LOCAL_PRIVATE_IP=10.100.111.2/30
 REMOTE_PRIVATE_IP=10.100.111.1/30
 MTU=1320
 MSS_MODE=clamp
+TXQUEUELEN=1000
 `
 	got := fixtureTunnel().MirrorText("/root/frp/gre")
 	if got != want {
@@ -86,15 +90,15 @@ func TestParseEnvTolerantAndStrict(t *testing.T) {
 		t.Fatalf("CLI-format env failed to parse: %v", err)
 	}
 
-	// Defaults for MTU/MSS like frp-gre's load_env.
+	// Defaults for MTU/MSS/TXQUEUELEN like frp-gre's load_env.
 	minimal := "LOCAL_PUBLIC_IP=1.2.3.4\nREMOTE_PUBLIC_IP=5.6.7.8\nIFACE=g1\n" +
 		"LOCAL_PRIVATE_IP=10.0.0.1/30\nREMOTE_PRIVATE_IP=10.0.0.2/30\n"
 	tun, err := ParseEnv("g1", minimal)
 	if err != nil {
 		t.Fatalf("minimal env failed: %v", err)
 	}
-	if tun.MTU != DefaultMTU || tun.MSSMode != DefaultMSSMode {
-		t.Errorf("defaults not applied: mtu=%d mss=%s", tun.MTU, tun.MSSMode)
+	if tun.MTU != DefaultMTU || tun.MSSMode != DefaultMSSMode || tun.TXQueuelen != DefaultTXQueuelen {
+		t.Errorf("defaults not applied: mtu=%d mss=%s txqueuelen=%d", tun.MTU, tun.MSSMode, tun.TXQueuelen)
 	}
 
 	// Unknown keys tolerated (bash source would too).
@@ -137,6 +141,7 @@ func TestValidate(t *testing.T) {
 		{"bad iface", func(t *Tunnel) { t.Iface = "bad iface!" }, true},
 		{"mtu too small", func(t *Tunnel) { t.MTU = 100 }, true},
 		{"mtu too big", func(t *Tunnel) { t.MTU = 9000 }, true},
+		{"txqueuelen too small", func(t *Tunnel) { t.TXQueuelen = 0 }, true},
 		{"bad mss mode", func(t *Tunnel) { t.MSSMode = "clampy" }, true},
 		{"mss off ok", func(t *Tunnel) { t.MSSMode = "off" }, false},
 		{"mss 1240 ok", func(t *Tunnel) { t.MSSMode = "1240" }, false},

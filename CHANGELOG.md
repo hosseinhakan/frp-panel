@@ -1,6 +1,32 @@
 # Changelog
 
-## v1.2.8 — GRE type matching, capability + NOTRACK fixes
+## v1.2.8 — mikeesierrah profile, non-destructive GRE, streaming tuning
+
+### Changed
+
+- **Restored the exact `mikeesierrah` defaults** for every newly created config
+  (still editable in the UI): frps `heartbeatTimeout=90`, `tcpKeepalive=120`,
+  `maxPoolCount=65535`, `tcpMux=false`, `tcpMuxKeepaliveInterval=10`,
+  `auth.method=token`, dual-stack `bindAddr="::"` (or the GRE private IP with
+  `proxyBindAddr="0.0.0.0"`), and a commented/optional QUIC block
+  (`10 / 30 / 100000`); frpc `loginFailExit=false`, `protocol=tcp`,
+  `tcpMux=false`, `tcpMuxKeepaliveInterval=10`, `dialServerTimeout=10`,
+  `dialServerKeepalive=120`, `poolCount=20`, `heartbeatInterval=30`,
+  `heartbeatTimeout=90`, `tls.enable=false`, QUIC `10 / 30 / 100000`, and the
+  compact `parseNumberRangePair` proxy block with `localIP="127.0.0.1"`,
+  `useEncryption=false`, `useCompression=false`. The CLI writers
+  (`frp-manager`), the Web wizard and `FRP_FOREIGN_SETUP` all emit the same
+  values.
+- **Kernel tuning cleaned up** in `frp-gre`, `frp-turbo` and
+  `FRP_FOREIGN_SETUP` (`/etc/sysctl.d/99-tunnel-turbo.conf`): dropped
+  `net.ipv4.tcp_notsent_lowat=16384` (starves YouTube/streaming bulk
+  transfers) and `net.ipv4.tcp_fastopen=3` (payloads stall on Iranian ISP/DPI
+  middleboxes). Their runtime values are reset to the kernel default
+  `4294967295` and `0`. Everything else is kept: `fq` + BBR, 16 MB buffers,
+  `netdev_max_backlog=16384`, `somaxconn=65535`,
+  `tcp_slow_start_after_idle=0`, `tcp_mtu_probing=1`, `tcp_base_mss=1024`,
+  `rp_filter=0`, POSTROUTING TCPMSS `1220`, conntrack `--notrack` for proto 47,
+  and `txqueuelen 1000`.
 
 ### Fixed
 
@@ -11,13 +37,30 @@
   CAP_DAC_READ_SEARCH`). systemd no longer rejects the unit and the daemons keep
   the capabilities they actually need.
 - **`gre/ip` tunnels are recognised.** `ip -d tunnel show` prints the link type
-  as `gre/ip` on modern kernels; `frp-gre purge_remote_conflicts`, the
-  `FRP_FOREIGN_SETUP` stale-tunnel cleanup and `frp-manager gre list` now match
-  both `gre` and `gre/ip` instead of skipping every real tunnel.
+  as `gre/ip` on modern kernels; the GRE conflict guards and
+  `frp-manager gre list` now match both `gre` and `gre/ip` instead of skipping
+  every real tunnel.
 - **No duplicate raw `NOTRACK` rule.** `FRP_FOREIGN_SETUP` no longer appends its
   own protocol-47 `NOTRACK` rules after `frp-gre up` has already installed the
   idempotent `CT --notrack` (with a `NOTRACK` fallback), keeping
   `iptables -t raw -S` clean.
+- **GRE handling is strictly non-destructive.** `frp-gre`, the Iran/Foreign
+  wizard, `frp-manager reverse` and `FRP_FOREIGN_SETUP` no longer stop, delete
+  or restart an existing tunnel or `frps@*`/`frpc@*`/`gre-tunnel@*` unit. A
+  matching `(local_public, remote_public)` pair (or an interface already up with
+  the expected private IP) is reused untouched; only a missing/down
+  `gre-tunnel@<iface>` is created/started, and a conflicting endpoint fails with
+  an error naming the conflicting interface instead of deleting it.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`,
+  `scripts/check-sync.sh`, and `bash -n` on the generated
+  `FRP_FOREIGN_SETUP` payload.
+- New regression tests assert the exact profile defaults, live-GRE reuse with no
+  restart, the absence of `tcp_notsent_lowat = 16384` / `tcp_fastopen = 3` /
+  `purge_remote_conflicts`, and valid `CAP_NET_BIND_SERVICE` capabilities.
 
 ## v1.2.7 — editable GRE tunnels, deeper tuning + 3-way link diagnostics
 

@@ -619,8 +619,8 @@ func TestServerEditExposesAllTransportFields(t *testing.T) {
 	}
 	for field, want := range map[string]float64{
 		"tcpMuxKeepaliveInterval": 10,
-		"heartbeatTimeout":        45,
-		"tcpKeepalive":            30,
+		"heartbeatTimeout":        90,
+		"tcpKeepalive":            120,
 		"maxPoolCount":            65535,
 		"quicKeepalivePeriod":     10,
 		"quicMaxIdleTimeout":      30,

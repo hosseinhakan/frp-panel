@@ -119,6 +119,30 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	}
 }
 
+// Re-running the Iran wizard against an already-live matching tunnel must
+// never restart (or stop) it: only the boot link is refreshed.
+func TestWizardReusesActiveGRETunnelWithoutRestart(t *testing.T) {
+	e := newTestEnv(t)
+	e.runner.active["gre-tunnel@gt11"] = "active"
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","enableWatchdog":false}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("wizard iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !e.runner.called("systemctl:enable gre-tunnel@gt11") {
+		t.Error("gre-tunnel@gt11 boot link was not refreshed")
+	}
+	for _, bad := range []string{
+		"systemctl:restart gre-tunnel@gt11",
+		"systemctl:stop gre-tunnel@gt11",
+	} {
+		if e.runner.called(bad) {
+			t.Errorf("wizard touched a live tunnel: %s", bad)
+		}
+	}
+}
+
 func TestWizardIranCustomTokenAndBind(t *testing.T) {
 	e := newTestEnv(t)
 	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
@@ -235,10 +259,10 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		`localPort = {{ $v.First }}`,
 		`remotePort = {{ $v.Second }}`,
 		`transport.dialServerTimeout = 10`,
-		`transport.dialServerKeepalive = 30`,
-		`transport.poolCount = 15`,
-		`transport.heartbeatInterval = 15`,
-		`transport.heartbeatTimeout = 45`,
+		`transport.dialServerKeepalive = 120`,
+		`transport.poolCount = 20`,
+		`transport.heartbeatInterval = 30`,
+		`transport.heartbeatTimeout = 90`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("frpc config missing %q:\n%s", want, raw)

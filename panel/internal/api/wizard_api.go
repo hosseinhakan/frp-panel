@@ -564,7 +564,7 @@ func (s *Server) upsertWizardTunnel(t gre.Tunnel) (wizardTunnelResult, error) {
 	}
 	res := wizardTunnelResult{Warnings: warnings, Backup: backup}
 	unit := "gre-tunnel@" + t.Name
-	if out, err := s.enableUnitNow(unit); err != nil {
+	if out, err := s.ensureGREUnit(unit); err != nil {
 		res.UnitError = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("wizard wrote %s but enable failed: %s", unit, res.UnitError)
 	}

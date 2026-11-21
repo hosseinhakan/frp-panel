@@ -277,12 +277,10 @@ net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
-net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
-net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
@@ -299,6 +297,12 @@ FRP_TUNING
     else
         rm -f "$tmp"
     fi
+    # 16 KB tcp_notsent_lowat starves bulk video streams (YouTube 1080p/4K) on
+    # 40–100 ms WAN links, and TCP Fast Open payloads stall on Iranian
+    # ISP/DPI middleboxes. Both keys are gone from the drop-in; reset their
+    # *runtime* values too, because removing a key never un-applies it.
+    sysctl -w net.ipv4.tcp_notsent_lowat=4294967295 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fastopen=0 >/dev/null 2>&1 || true
     # BBR is a module on most kernels: make it load now and at every boot so
     # the congestion-control key above never fails silently after a reboot.
     mkdir -p /etc/modules-load.d
@@ -320,33 +324,57 @@ FRP_TUNING
     done
 }
 
-purge_remote_conflicts() {
-    # A keyless GRE cannot have two interfaces with the same remote endpoint;
-    # a stale/manual tunnel makes `ip tunnel add` fail with "File exists".
-    # Remove any other interface already pointed at this remote.
-    local name
-    while read -r name; do
-        [[ -n "$name" && "$name" != "$IFACE" ]] || continue
-        echo "frp-gre: removing stale GRE $name (same remote $REMOTE_PUBLIC_IP)"
-        ip tunnel del "$name" 2>/dev/null || ip link del "$name" 2>/dev/null || true
-    done < <(ip -d tunnel show 2>/dev/null | awk -v r="$REMOTE_PUBLIC_IP" '
+conflicting_tunnels() {
+    # A keyless GRE cannot have two interfaces with the same remote endpoint.
+    # Print any *other* live interface already pointed at this remote so the
+    # caller can fail loudly instead of deleting someone else's tunnel.
+    ip -d tunnel show 2>/dev/null | awk -v r="$REMOTE_PUBLIC_IP" -v self="$IFACE" '
         $2 ~ /^gre(\/|$)/ {
             name = $1; sub(/:$/, "", name)
+            if (name == self) next
             for (i = 3; i < NF; i++) if ($i == "remote" && $(i + 1) == r) { print name; break }
-        }')
+        }'
 }
 
 cmd_up() {
     load_env "${1:-}"
     if ip link show "$IFACE" >/dev/null 2>&1; then
-        echo "frp-gre: interface $IFACE already exists, refreshing rules"
+        # Never repoint a live interface: a mismatched endpoint is a conflict
+        # the operator must resolve explicitly.
+        local live_remote live_local
+        live_remote="$(ip -d tunnel show "$IFACE" 2>/dev/null | awk '$2 ~ /^gre(\/|$)/ {for (i = 3; i < NF; i++) if ($i == "remote") { print $(i + 1); exit }}')"
+        live_local="$(ip -d tunnel show "$IFACE" 2>/dev/null | awk '$2 ~ /^gre(\/|$)/ {for (i = 3; i < NF; i++) if ($i == "local") { print $(i + 1); exit }}')"
+        if [[ -n "$live_remote" && "$live_remote" != "$REMOTE_PUBLIC_IP" ]]; then
+            echo "frp-gre: $IFACE already points at remote $live_remote, expected $REMOTE_PUBLIC_IP — refusing to modify it (stop/delete it explicitly first)" >&2
+            exit 1
+        fi
+        if [[ -n "$live_local" && "$live_local" != "$LOCAL_PUBLIC_IP" ]]; then
+            echo "frp-gre: $IFACE already uses local $live_local, expected $LOCAL_PUBLIC_IP — refusing to modify it (stop/delete it explicitly first)" >&2
+            exit 1
+        fi
+        echo "frp-gre: interface $IFACE already exists, refreshing rules (never deleting it)"
     else
-        purge_remote_conflicts
+        local conflict
+        conflict="$(conflicting_tunnels)"
+        if [[ -n "$conflict" ]]; then
+            echo "frp-gre: refusing to create $IFACE: GRE tunnel(s) $conflict already target remote $REMOTE_PUBLIC_IP — stop/delete them explicitly first" >&2
+            exit 1
+        fi
         ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
     fi
-    ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
-    ip link set dev "$IFACE" mtu "$MTU" up
-    ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
+    # Re-assert only what actually differs: rewriting the address or MTU of a
+    # healthy carrying tunnel can drop in-flight traffic.
+    if ! ip -o -4 addr show dev "$IFACE" 2>/dev/null | grep -qw "${LOCAL_PRIVATE_IP%%/*}"; then
+        ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true
+    fi
+    local cur_mtu cur_state
+    cur_mtu="$(cat "/sys/class/net/$IFACE/mtu" 2>/dev/null || echo '')"
+    [[ -n "$cur_mtu" && "$cur_mtu" == "$MTU" ]] || ip link set dev "$IFACE" mtu "$MTU"
+    cur_state="$(cat "/sys/class/net/$IFACE/operstate" 2>/dev/null || echo '')"
+    [[ "$cur_state" == "up" || "$cur_state" == "unknown" ]] || ip link set dev "$IFACE" up
+    local cur_txq
+    cur_txq="$(cat "/sys/class/net/$IFACE/tx_queue_len" 2>/dev/null || echo '')"
+    [[ -n "$cur_txq" && "$cur_txq" == "$TXQUEUELEN" ]] || ip link set dev "$IFACE" txqueuelen "$TXQUEUELEN" 2>/dev/null || true
     apply_tuning
     notrack_ensure PREROUTING
     notrack_ensure OUTPUT
@@ -480,12 +508,10 @@ net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
-net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
-net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
@@ -513,6 +539,11 @@ cmd_apply() {
     if ! sysctl --system >/dev/null; then
         echo "frp-turbo: warning: some sysctls could not be applied (kernel may not support them)" >&2
     fi
+    # Undo the old (harmful) values at runtime: 16 KB tcp_notsent_lowat
+    # starves YouTube/streaming bulk transfers on 40–100 ms links, and TCP
+    # Fast Open payloads stall on Iranian ISP/DPI middleboxes.
+    sysctl -w net.ipv4.tcp_notsent_lowat=4294967295 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fastopen=0 >/dev/null 2>&1 || true
     ensure_gc_cron
     echo "frp-turbo: applied BBR + fq + stability sysctls ($SYSCTL_DROPIN); GC cron ensured"
     cmd_status
@@ -1295,8 +1326,8 @@ setup_server() {
     echo "  1) none"
     echo "  2) quic"
     echo "  3) kcp"
-    read -p "Protocol [2]: " proto_choice
-    proto_choice=${proto_choice:-2}
+    read -p "Protocol [1]: " proto_choice
+    proto_choice=${proto_choice:-1}
 
     read -p "Enable TCP Mux (y/n) [n]: " use_mux
     use_mux=${use_mux:-n}
@@ -1385,11 +1416,11 @@ setup_server() {
         fi
         echo
 
-        echo "transport.heartbeatTimeout = 45"
+        echo "transport.heartbeatTimeout = 90"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = $( [[ $use_mux =~ ^[Yy]$ ]] && echo true || echo false )"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 30"
+        echo "transport.tcpKeepalive = 120"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -1615,10 +1646,10 @@ transport.protocol = "$transport"
 transport.tcpMux = $mux
 transport.tcpMuxKeepaliveInterval = 10
 transport.dialServerTimeout = 10
-transport.dialServerKeepalive = 30
-transport.poolCount = 15
-transport.heartbeatInterval = 15
-transport.heartbeatTimeout = 45
+transport.dialServerKeepalive = 120
+transport.poolCount = 20
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
 transport.tls.enable = $tls_enabled
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
@@ -1665,10 +1696,10 @@ EOF
             echo "transport.tcpMux = $mux"
             echo "transport.tcpMuxKeepaliveInterval = 10"
             echo "transport.dialServerTimeout = 10"
-            echo "transport.dialServerKeepalive = 30"
-            echo "transport.poolCount = 15"
-            echo "transport.heartbeatInterval = 15"
-            echo "transport.heartbeatTimeout = 45"
+            echo "transport.dialServerKeepalive = 120"
+            echo "transport.poolCount = 20"
+            echo "transport.heartbeatInterval = 30"
+            echo "transport.heartbeatTimeout = 90"
             echo "transport.tls.enable = $tls_enabled"
             echo "transport.quic.keepalivePeriod = 10"
             echo "transport.quic.maxIdleTimeout = 30"
@@ -2074,6 +2105,36 @@ gre_list() {
     done
 }
 
+# gre_live_healthy IFACE LP RP LPRIV — true when the interface is up with the
+# expected public endpoints and already carries the expected private address.
+gre_live_healthy() {
+    local iface="$1" lp="$2" rp="$3" lpriv="$4"
+    ip link show "$iface" >/dev/null 2>&1 || return 1
+    local live_iface live_lp live_rp
+    while read -r live_iface live_lp live_rp; do
+        [[ "$live_iface" == "$iface" ]] || continue
+        if [[ "$live_lp" == "$lp" && "$live_rp" == "$rp" ]] || [[ "$live_lp" == "$rp" && "$live_rp" == "$lp" ]]; then
+            ip -o -4 addr show dev "$iface" 2>/dev/null | grep -qw "${lpriv%%/*}" && return 0
+        fi
+    done < <(reverse_live_tunnels)
+    return 1
+}
+
+# gre_env_matches IFACE LP RP LPRIV RPRIV MTU MSS TXQ — true when an existing
+# env file already holds exactly these values (no requested change).
+gre_env_matches() {
+    local f="$GRE_DIR/$1.env"
+    [[ -r "$f" ]] || return 1
+    [[ "$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)" == "$2" ]] || return 1
+    [[ "$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)" == "$3" ]] || return 1
+    [[ "$(sed -n 's/^LOCAL_PRIVATE_IP=//p' "$f" | head -n1)" == "$4" ]] || return 1
+    [[ "$(sed -n 's/^REMOTE_PRIVATE_IP=//p' "$f" | head -n1)" == "$5" ]] || return 1
+    [[ "$(sed -n 's/^MTU=//p' "$f" | head -n1)" == "$6" ]] || return 1
+    [[ "$(sed -n 's/^MSS_MODE=//p' "$f" | head -n1)" == "$7" ]] || return 1
+    [[ "$(sed -n 's/^TXQUEUELEN=//p' "$f" | head -n1)" == "${8:-1000}" ]] || return 1
+    return 0
+}
+
 # gre_create_do LP RP IFACE LPRIV RPRIV MTU MSS [TXQUEUELEN] — shared by menu + CLI
 gre_create_do() {
     local lp="$1" rp="$2" iface="$3" lpriv="$4" rpriv="$5" mtu="$6" mss="$7" txq="${8:-1000}"
@@ -2105,10 +2166,26 @@ gre_create_do() {
 
     ensure_gre_assets
 
+    # Strictly non-destructive: if this exact tunnel is already up and healthy
+    # with an unchanged definition, leave the interface and unit alone. Only a
+    # request that actually changes the definition (or a missing/down tunnel)
+    # proceeds to write + start/restart.
+    local reuse_live=0
+    if gre_live_healthy "$iface" "$lp" "$rp" "$lpriv"; then
+        if [[ ! -f "$GRE_DIR/$iface.env" ]] || \
+           gre_env_matches "$iface" "$lp" "$rp" "$lpriv" "$rpriv" "$mtu" "$mss" "$txq"; then
+            reuse_live=1
+        fi
+    fi
+
     mkdir -p "$GRE_DIR"
     if [[ -f "$GRE_DIR/$iface.env" ]]; then
-        print_warning "Overwriting existing $GRE_DIR/$iface.env"
-        cp -a "$GRE_DIR/$iface.env" "$GRE_DIR/$iface.env.bak-$(date +%Y%m%d-%H%M%S)"
+        if [[ $reuse_live -eq 0 ]]; then
+            print_warning "Overwriting existing $GRE_DIR/$iface.env"
+        fi
+        if [[ $reuse_live -eq 0 ]]; then
+            cp -a "$GRE_DIR/$iface.env" "$GRE_DIR/$iface.env.bak-$(date +%Y%m%d-%H%M%S)"
+        fi
     fi
     {
         echo "# GRE tunnel definition (FRP Tunnel Suite) — managed by frp-manager / frp-panel"
@@ -2122,6 +2199,17 @@ gre_create_do() {
         echo "TXQUEUELEN=$txq"
     } > "$GRE_DIR/$iface.env"
     chmod 600 "$GRE_DIR/$iface.env"
+
+    if [[ $reuse_live -eq 1 ]]; then
+        # Persist boot-time management without touching the live link.
+        systemctl enable "gre-tunnel@$iface" >/dev/null 2>&1 || true
+        print_success "GRE tunnel $iface is already up with these endpoints — reused untouched (no restart)."
+        local busy_peer="${rpriv%%/*}"
+        if ping -c3 -W2 -I "$iface" "$busy_peer" >/dev/null 2>&1; then
+            print_success "Tunnel $iface is up and the peer $busy_peer answers."
+        fi
+        return 0
+    fi
 
     print_info "Enabling gre-tunnel@$iface..."
     systemctl enable --now "gre-tunnel@$iface"
@@ -2638,11 +2726,11 @@ reverse_iran_do() {
             echo "# transport.quic.maxIncomingStreams = 100000"
         fi
         echo
-        echo "transport.heartbeatTimeout = 45"
+        echo "transport.heartbeatTimeout = 90"
         echo "transport.maxPoolCount = 65535"
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
-        echo "transport.tcpKeepalive = 30"
+        echo "transport.tcpKeepalive = 120"
         echo
         echo "auth.method = \"token\""
         echo "auth.token = \"$token\""
@@ -2764,10 +2852,10 @@ reverse_foreign_do() {
         echo "transport.tcpMux = false"
         echo "transport.tcpMuxKeepaliveInterval = 10"
         echo "transport.dialServerTimeout = 10"
-        echo "transport.dialServerKeepalive = 30"
-        echo "transport.poolCount = 15"
-        echo "transport.heartbeatInterval = 15"
-        echo "transport.heartbeatTimeout = 45"
+        echo "transport.dialServerKeepalive = 120"
+        echo "transport.poolCount = 20"
+        echo "transport.heartbeatInterval = 30"
+        echo "transport.heartbeatTimeout = 90"
         echo "transport.tls.enable = false"
         echo "transport.quic.keepalivePeriod = 10"
         echo "transport.quic.maxIdleTimeout = 30"

@@ -123,6 +123,20 @@ func (s *Server) enableUnitNow(unit string) (string, error) {
 	return s.runner.Systemctl("restart", unit)
 }
 
+// ensureGREUnit persists a gre-tunnel@ unit at boot and starts it only when it
+// is not already running. Re-running a wizard or creating an already-live
+// tunnel must never restart (and therefore drop) a healthy carrying tunnel.
+func (s *Server) ensureGREUnit(unit string) (string, error) {
+	out, err := s.runner.Systemctl("enable", unit)
+	if err != nil {
+		return out, err
+	}
+	if s.unitIsActive(unit) {
+		return out, nil
+	}
+	return s.runner.Systemctl("start", unit)
+}
+
 // disableUnitNow is the safe replacement for `systemctl disable --now`:
 // disable removes the boot links, stop halts the running instance.
 func (s *Server) disableUnitNow(unit string) (string, error) {

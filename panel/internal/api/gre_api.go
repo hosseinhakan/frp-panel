@@ -188,7 +188,7 @@ func (s *Server) handleGRECreate(w http.ResponseWriter, r *http.Request) {
 
 	unit := "gre-tunnel@" + t.Name
 	unitErr := ""
-	if out, err := s.enableUnitNow(unit); err != nil {
+	if out, err := s.ensureGREUnit(unit); err != nil {
 		unitErr = strings.TrimSpace(strings.TrimSpace(out) + " " + err.Error())
 		audit("created GRE tunnel %s but enable failed: %s", t.Name, unitErr)
 	}

@@ -60,19 +60,22 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		`parseNumberRangePair "8989,8443" "8989,8443"`,
 		`name = "tcp-{{ $v.First }}"`,
 		"transport.dialServerTimeout = 10",
-		"transport.dialServerKeepalive = 30",
-		"transport.poolCount = 15",
-		"transport.heartbeatInterval = 15",
-		"transport.heartbeatTimeout = 45",
+		"transport.dialServerKeepalive = 120",
+		"transport.poolCount = 20",
+		"transport.heartbeatInterval = 30",
+		"transport.heartbeatTimeout = 90",
 		// Anti-disconnect hardening: local SYN MSS, rp_filter/MTU probing, and
-		// a duplicate-GRE guard before ip tunnel add. Protocol-47 NOTRACK is
-		// left to `frp-gre up`, which installs it idempotently.
+		// a non-destructive duplicate-GRE guard before ip tunnel add. A
+		// Protocol-47 NOTRACK is left to `frp-gre up`, which installs it
+		// idempotently.
 		`iptables -t mangle -A POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220`,
 		`net.ipv4.conf."$IFACE".rp_filter=0`,
 		"net.ipv4.tcp_mtu_probing=1",
-		"ip -d tunnel show", // stale GRE with the same remote is removed first
+		"ip -d tunnel show", // conflicts are detected, never deleted
 		`$2~/^gre(\/|$)/`,   // `ip -d tunnel show` prints gre/ip on modern kernels
-		"purge_remote_conflicts",
+		"GRE_REUSED=0",      // matching live tunnel is reused untouched
+		"reusing live GRE $IFACE",
+		"refusing to create $IFACE",
 		"/usr/local/bin/frpc",
 		"net.core.default_qdisc = fq", // BBR + fq tuning
 		"pkill -10 -x frpc",           // 3h GC cron
@@ -80,6 +83,23 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("foreign script missing %q:\n%s", want, script)
 		}
+	}
+	for _, forbid := range []string{
+		"purge_remote_conflicts",
+		`systemctl stop "gre-tunnel@`,
+		`systemctl stop "frpc@`,
+		"removing stale GRE",
+		`systemctl restart "gre-tunnel@`,
+		"net.ipv4.tcp_notsent_lowat = 16384",
+		"net.ipv4.tcp_fastopen = 3",
+	} {
+		if strings.Contains(script, forbid) {
+			t.Errorf("foreign script must not contain %q (destructive/harmful):\n%s", forbid, script)
+		}
+	}
+	if !strings.Contains(script, "net.ipv4.tcp_notsent_lowat=4294967295") ||
+		!strings.Contains(script, "net.ipv4.tcp_fastopen=0") {
+		t.Errorf("foreign script must reset the old harmful sysctls at runtime:\n%s", script)
 	}
 	if strings.Contains(script, `iptables -t raw -A PREROUTING -p 47 -j NOTRACK`) ||
 		strings.Contains(script, `iptables -t raw -A OUTPUT -p 47 -j NOTRACK`) {
@@ -128,9 +148,9 @@ func TestForeignScriptUnlinkedRequiresPublicIP(t *testing.T) {
 }
 
 func TestForeignScriptGREAwkMatchesGREIP(t *testing.T) {
-	// Modern kernels print the link type as `gre/ip`; the stale-tunnel
-	// cleanup pipeline must still extract the interface name (it deletes any
-	// other tunnel pointed at the same remote before `ip tunnel add`).
+	// Modern kernels print the link type as `gre/ip`; the conflict-detection
+	// pipeline must still extract the interface name (it refuses to create a
+	// new tunnel while another one points at the same remote).
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")

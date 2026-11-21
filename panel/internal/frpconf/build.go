@@ -69,7 +69,9 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 		o.ProxyBindAddr = DefaultProxyBindAddr(o.BindAddr)
 	}
 	if o.Protocol == "" {
-		o.Protocol = ProtoQUIC
+		// The proven mikeesierrah profile runs plain TCP; QUIC stays an
+		// explicit opt-in (the tuning block is still emitted as comments).
+		o.Protocol = ProtoNone
 	}
 
 	c := &ServerConfig{BindAddr: o.BindAddr, BindPort: o.BindPort, ProxyBindAddr: o.ProxyBindAddr}
@@ -84,13 +86,14 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	// Stability-tuned for lossy long-haul links: a 45s heartbeat timeout with
-	// frpc's 15s interval detects dead peers fast without flapping.
-	c.Transport.HeartbeatTimeout = 45
+	// Exact mikeesierrah profile: a 90s heartbeat timeout pairs with frpc's
+	// 30s interval (3 missed heartbeats), and the 120s TCP keepalive avoids
+	// DPI/stateful-firewall idle drops on long-haul links.
+	c.Transport.HeartbeatTimeout = 90
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 30
+	c.Transport.TCPKeepalive = 120
 
 	c.Auth.Method = "token"
 	if o.Token == "" {
@@ -180,13 +183,14 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
 	t.DialServerTimeout = 10
-	// Stability-tuned for high-loss Iran↔Foreign GRE links: a 15-connection
-	// warm pool keeps reconnects instant without a bursty SYN flood, and the
-	// 15s/45s heartbeat pair fails over quickly without flapping.
-	t.DialServerKeepalive = 30
-	t.PoolCount = 15
-	t.HeartbeatInterval = 15
-	t.HeartbeatTimeout = 45
+	// Exact mikeesierrah profile: a 20-connection warm pool keeps reconnects
+	// instant without a bursty SYN flood, the 30s/90s heartbeat pair tolerates
+	// lossy GRE without flapping, and the 120s dial keepalive holds idle
+	// control connections through DPI middleboxes.
+	t.DialServerKeepalive = 120
+	t.PoolCount = 20
+	t.HeartbeatInterval = 30
+	t.HeartbeatTimeout = 90
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 

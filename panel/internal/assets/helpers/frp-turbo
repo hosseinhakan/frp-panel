@@ -39,12 +39,10 @@ net.ipv4.tcp_max_syn_backlog = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_base_mss = 1024
-net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
-net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
@@ -72,6 +70,11 @@ cmd_apply() {
     if ! sysctl --system >/dev/null; then
         echo "frp-turbo: warning: some sysctls could not be applied (kernel may not support them)" >&2
     fi
+    # Undo the old (harmful) values at runtime: 16 KB tcp_notsent_lowat
+    # starves YouTube/streaming bulk transfers on 40–100 ms links, and TCP
+    # Fast Open payloads stall on Iranian ISP/DPI middleboxes.
+    sysctl -w net.ipv4.tcp_notsent_lowat=4294967295 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fastopen=0 >/dev/null 2>&1 || true
     ensure_gc_cron
     echo "frp-turbo: applied BBR + fq + stability sysctls ($SYSCTL_DROPIN); GC cron ensured"
     cmd_status

@@ -210,13 +210,13 @@ func (s *Server) resolveForeignTunnel(req *foreignScriptReq, bindAddr string) (g
 	autoOctet := 0
 	if !linked {
 		if iface == "" || strings.TrimSpace(req.Subnet) == "" {
-			usedIfaces, usedOctets, _, serr := s.wizardGREState()
+			inv, serr := s.wizardGREState()
 			if serr == nil {
 				if iface == "" {
-					iface = nextFreeIface(usedIfaces)
+					iface = nextFreeIface(inv.ifaces)
 				}
 				if strings.TrimSpace(req.Subnet) == "" {
-					autoOctet = nextFreeSubnet(usedOctets)
+					autoOctet = nextFreeSubnet(inv.octets)
 				}
 			}
 		}

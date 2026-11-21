@@ -314,7 +314,7 @@ the console + written nowhere else; first login forces a password change (bcrypt
 | GET | `/api/stats?instance=…` | scraped frp webServer metrics + rolling history (conns, in/out bytes per proxy) |
 | GET | `/api/backup/export`, POST `/api/backup/import` | ZIP stream down / multipart restore (selective categories) |
 | GET | `/api/wizard/gre-frp/defaults` | next free GRE iface, `10.100.<n>.0/30` subnet and frps control port (scans envs, live links, configs, `/proc/net/tcp`) |
-| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; auto-allocates a free iface/subnet/port on conflict; optional custom token, frps bind (`GRE IP`/`::`/`0.0.0.0`) and `rawSpeed`. `mirrorPayload` accepts both the plain `KEY=VALUE` block and the generated `FRP_FOREIGN_SETUP` script (shell lines ignored, quoted assignments extracted) |
+| POST | `/api/wizard/gre-frp` | create the Iran entry or Foreign exit half; reuses the existing GRE iface + `/30` when the same public pair (or remote IP) is already live, otherwise auto-allocates a free iface/subnet/port on conflict; optional custom token, frps bind (`GRE IP`/`::`/`0.0.0.0`) and `rawSpeed`. `mirrorPayload` accepts both the plain `KEY=VALUE` block and the generated `FRP_FOREIGN_SETUP` script (shell lines ignored, quoted assignments extracted) |
 | GET | `/api/watchdog`, POST `/api/watchdog` | state, config (Telegram token masked), recent heal events |
 | POST | `/api/watchdog/test-telegram` | send one test alert using stored or posted credentials |
 | GET | `/api/health`, `/api/version` | unauthenticated liveness + build info |

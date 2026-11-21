@@ -29,18 +29,37 @@ const (
 var (
 	liveIfacePattern = regexp.MustCompile(`^\s*\d+:\s+([^:@\s]+)`)
 	serverNamePort   = regexp.MustCompile(`^server-([0-9]{1,5})$`)
+	// `ip -d tunnel show` prints one line per tunnel, e.g.
+	//   gt11: gre remote 206.1.100.7 local 5.6.7.8 dev eth0 ...
+	liveGRETunnelLine = regexp.MustCompile(`^\s*([^:\s]+):\s+gre\b(.*)$`)
+	liveGREEndpoint   = regexp.MustCompile(`\b(remote|local)\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)`)
+	inetCIDRPattern   = regexp.MustCompile(`\binet\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+)`)
 )
+
+// greInventory is the snapshot of every GRE tunnel known to this host: the
+// /root/frp/gre/*.env definitions plus interfaces the kernel currently has
+// (`ip -d tunnel show`). The live view matters because a manually-created or
+// half-provisioned tunnel has no env file, and adding a second keyless GRE to
+// the same endpoint fails in the kernel with `File exists`.
+type greInventory struct {
+	ifaces  *ifaceSet
+	octets  map[int]bool
+	tunnels []gre.Tunnel
+	// liveKeys marks tunnels discovered via `ip -d tunnel show`, so callers
+	// can tell a plain env rerun from a reused kernel-only interface.
+	liveKeys map[string]bool
+}
 
 // handleWizardDefaults returns the next free iface, /30 subnet and control
 // port so the Web UI can pre-fill the Iran form on a busy host.
 func (s *Server) handleWizardDefaults(w http.ResponseWriter, r *http.Request) {
-	ifaces, octets, tunnels, err := s.wizardGREState()
+	inv, err := s.wizardGREState()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot scan GRE tunnels: %v", err)
 		return
 	}
-	iface := nextFreeIface(ifaces)
-	octet := nextFreeSubnet(octets)
+	iface := nextFreeIface(inv.ifaces)
+	octet := nextFreeSubnet(inv.octets)
 	port, _, err := s.allocateControlPort(wizardDefaultPort)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot scan control ports: %v", err)
@@ -53,27 +72,56 @@ func (s *Server) handleWizardDefaults(w http.ResponseWriter, r *http.Request) {
 		"remotePrivateIp": fmt.Sprintf("10.100.%d.1/30", octet),
 		"controlPort":     port,
 		"serverAddr":      fmt.Sprintf("10.100.%d.2", octet),
-		"existingTunnels": len(tunnels),
+		"existingTunnels": len(inv.tunnels),
 	})
 }
 
 // wizardGREState collects every GRE interface and /30 third octet in use,
-// from env files, live links and /sys/class/net.
-func (s *Server) wizardGREState() (usedIfaces *ifaceSet, usedOctets map[int]bool, tunnels []gre.Tunnel, err error) {
-	ifaces := newIfaceSet()
-	octets := map[int]bool{}
+// from env files, live GRE tunnels (`ip -d tunnel show`), live links and
+// /sys/class/net.
+func (s *Server) wizardGREState() (*greInventory, error) {
+	inv := &greInventory{
+		ifaces:   newIfaceSet(),
+		octets:   map[int]bool{},
+		liveKeys: map[string]bool{},
+	}
 
-	tunnels, _, err = gre.List(s.paths.GREDir)
+	tunnels, _, err := gre.List(s.paths.GREDir)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	for _, t := range tunnels {
-		ifaces.add(t.Iface)
-		ifaces.add(t.Name)
+		inv.ifaces.add(t.Iface)
+		inv.ifaces.add(t.Name)
 		for _, cidr := range []string{t.LocalPrivateIP, t.RemotePrivateIP} {
 			if n, ok := subnetOctet(cidr); ok {
-				octets[n] = true
+				inv.octets[n] = true
 			}
+		}
+		inv.tunnels = append(inv.tunnels, t)
+	}
+
+	// Live GRE tunnels. An interface the kernel already owns is authoritative
+	// even without an env file: reusing it avoids the kernel's EEXIST failure
+	// when a second keyless tunnel targets the same public endpoint.
+	for _, lt := range s.liveGRETunnels() {
+		inv.ifaces.add(lt.Iface)
+		lp, rp := s.ifacePrivatePair(lt.Iface, tunnels)
+		lt.LocalPrivateIP, lt.RemotePrivateIP = lp, rp
+		if n, ok := subnetOctet(lp); ok {
+			inv.octets[n] = true
+		}
+		duplicate := false
+		for _, et := range tunnels {
+			if et.Iface == lt.Iface && et.LocalPublicIP == lt.LocalPublicIP &&
+				et.RemotePublicIP == lt.RemotePublicIP {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			inv.liveKeys[tunnelKey(lt)] = true
+			inv.tunnels = append(inv.tunnels, lt)
 		}
 	}
 
@@ -82,17 +130,152 @@ func (s *Server) wizardGREState() (usedIfaces *ifaceSet, usedOctets map[int]bool
 	if out, ierr := s.runner.Exec("ip", "-o", "link", "show"); ierr == nil {
 		for _, line := range strings.Split(out, "\n") {
 			if m := liveIfacePattern.FindStringSubmatch(line); m != nil {
-				ifaces.add(m[1])
+				inv.ifaces.add(m[1])
 			}
 		}
 	}
 	// /sys/class/net is authoritative even without iproute2.
 	if entries, derr := os.ReadDir(s.paths.SysNetDir); derr == nil {
 		for _, e := range entries {
-			ifaces.add(e.Name())
+			inv.ifaces.add(e.Name())
 		}
 	}
-	return ifaces, octets, tunnels, nil
+	return inv, nil
+}
+
+// liveGRETunnels parses `ip -d tunnel show` into tunnel definitions. The
+// kernel output carries the public endpoints but not the private /30; that is
+// filled in by ifacePrivatePair.
+func (s *Server) liveGRETunnels() []gre.Tunnel {
+	out, err := s.runner.Exec("ip", "-d", "tunnel", "show")
+	if err != nil {
+		return nil
+	}
+	return parseLiveGRETunnels(out)
+}
+
+func parseLiveGRETunnels(out string) []gre.Tunnel {
+	var tunnels []gre.Tunnel
+	for _, line := range strings.Split(out, "\n") {
+		m := liveGRETunnelLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		t := gre.Tunnel{Name: m[1], Iface: m[1]}
+		for _, em := range liveGREEndpoint.FindAllStringSubmatch(m[2], -1) {
+			switch em[1] {
+			case "local":
+				t.LocalPublicIP = em[2]
+			case "remote":
+				t.RemotePublicIP = em[2]
+			}
+		}
+		if t.LocalPublicIP == "" || t.RemotePublicIP == "" {
+			continue
+		}
+		tunnels = append(tunnels, t)
+	}
+	return tunnels
+}
+
+// ifacePrivatePair resolves the /30 pair for an interface, preferring the env
+// definition (authoritative, already oriented) and falling back to the live
+// IPv4 address from `ip -o -4 addr show dev <iface>`.
+func (s *Server) ifacePrivatePair(iface string, env []gre.Tunnel) (local, remote string) {
+	for _, t := range env {
+		if t.Iface == iface || t.Name == iface {
+			if t.LocalPrivateIP != "" {
+				return t.LocalPrivateIP, t.RemotePrivateIP
+			}
+		}
+	}
+	out, err := s.runner.Exec("ip", "-o", "-4", "addr", "show", "dev", iface)
+	if err != nil {
+		return "", ""
+	}
+	m := inetCIDRPattern.FindStringSubmatch(out)
+	if m == nil {
+		return "", ""
+	}
+	local = m[1]
+	remote, _ = peerPrivateCIDR(local)
+	return local, remote
+}
+
+// peerPrivateCIDR returns the other usable host of a point-to-point /30.
+func peerPrivateCIDR(cidr string) (string, bool) {
+	ipPart, mask, ok := strings.Cut(cidr, "/")
+	if !ok || mask != "30" {
+		return "", false
+	}
+	parts := strings.Split(ipPart, ".")
+	if len(parts) != 4 {
+		return "", false
+	}
+	host, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return "", false
+	}
+	var peer int
+	switch host {
+	case 1:
+		peer = 2
+	case 2:
+		peer = 1
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s.%s.%s.%d/30", parts[0], parts[1], parts[2], peer), true
+}
+
+// findReusableTunnel returns an existing GRE tunnel that already terminates
+// at remotePub. An exact public pair (in either orientation) is a plain
+// refresh; a matching remote endpoint alone means the local public IP changed.
+// Both are reused so the kernel never sees a duplicate keyless tunnel. live
+// reports that the match came from `ip -d tunnel show` rather than an env
+// definition, so callers can surface a reuse notice.
+func findReusableTunnel(inv *greInventory, localPub, remotePub string) (t gre.Tunnel, exact, live, ok bool) {
+	localPub, remotePub = strings.TrimSpace(localPub), strings.TrimSpace(remotePub)
+	if localPub == "" || remotePub == "" {
+		return gre.Tunnel{}, false, false, false
+	}
+	// Prefer a match that knows its /30, and among those an exact pair.
+	for _, candidate := range inv.tunnels {
+		if ownTunnel(candidate, localPub, remotePub) && tunnelHasPrivate(candidate) {
+			return candidate, true, inv.liveKeys[tunnelKey(candidate)], true
+		}
+	}
+	for _, candidate := range inv.tunnels {
+		if ownTunnel(candidate, localPub, remotePub) {
+			return candidate, true, inv.liveKeys[tunnelKey(candidate)], true
+		}
+	}
+	for _, candidate := range inv.tunnels {
+		if candidate.RemotePublicIP == remotePub && tunnelHasPrivate(candidate) {
+			return candidate, false, inv.liveKeys[tunnelKey(candidate)], true
+		}
+	}
+	for _, candidate := range inv.tunnels {
+		if candidate.RemotePublicIP == remotePub {
+			return candidate, false, inv.liveKeys[tunnelKey(candidate)], true
+		}
+	}
+	return gre.Tunnel{}, false, false, false
+}
+
+func tunnelKey(t gre.Tunnel) string {
+	return t.Iface + "|" + t.LocalPublicIP + "|" + t.RemotePublicIP
+}
+
+func tunnelHasPrivate(t gre.Tunnel) bool {
+	return t.LocalPrivateIP != "" || t.RemotePrivateIP != ""
+}
+
+func tunnelOctet(t gre.Tunnel) (int, bool) {
+	if n, ok := subnetOctet(t.LocalPrivateIP); ok {
+		return n, true
+	}
+	return subnetOctet(t.RemotePrivateIP)
 }
 
 // ownTunnel reports whether an existing env is this same GRE pair (matching
@@ -110,8 +293,10 @@ func ownTunnel(t gre.Tunnel, localPub, remotePub string) bool {
 
 // allocateWizardGRE resolves the requested iface/subnet into a free pair.
 // Only the conflicting component moves; the returned warnings explain both.
+// Before allocating anything, an existing GRE tunnel to the same public peer
+// (env file or live kernel tunnel) is reused with its original /30.
 func (s *Server) allocateWizardGRE(reqIface, reqSubnet, localPub, remotePub string) (iface string, octet int, warnings []string, err error) {
-	usedIfaces, usedOctets, tunnels, err := s.wizardGREState()
+	inv, err := s.wizardGREState()
 	if err != nil {
 		return "", 0, nil, err
 	}
@@ -125,23 +310,25 @@ func (s *Server) allocateWizardGRE(reqIface, reqSubnet, localPub, remotePub stri
 		reqOctet = v
 	}
 
-	// The same public pair already exists: refresh that tunnel rather than
-	// cloning it (the UI pre-fills globally free values, not pair-aware ones).
-	for _, t := range tunnels {
-		if !ownTunnel(t, localPub, remotePub) {
-			continue
+	// The same public pair (or the same remote endpoint after a local IP
+	// change) already has a tunnel: reuse its interface and /30 rather than
+	// letting the kernel reject a duplicate keyless GRE with `File exists`.
+	if t, exact, live, ok := findReusableTunnel(inv, localPub, remotePub); ok {
+		reuseOctet, oerr := tunnelOctet(t)
+		if !oerr {
+			return "", 0, nil, fmt.Errorf(
+				"existing GRE tunnel %s for %s has no IPv4 /30; delete it or assign one first",
+				t.Iface, strings.TrimSpace(remotePub))
 		}
-		oct := wizardSubnetStart
-		if n, ok := subnetOctet(t.LocalPrivateIP); ok {
-			oct = n
-		} else if n, ok := subnetOctet(t.RemotePrivateIP); ok {
-			oct = n
+		if !exact || live {
+			warnings = append(warnings, fmt.Sprintf(
+				"reused existing GRE tunnel %s for %s (%s)", t.Iface, strings.TrimSpace(remotePub), subnetCIDR(reuseOctet)))
 		}
-		return t.Iface, oct, nil, nil
+		return t.Iface, reuseOctet, warnings, nil
 	}
 
-	ifaceBusy := usedIfaces.has(reqIface)
-	subnetBusy := usedOctets[reqOctet]
+	ifaceBusy := inv.ifaces.has(reqIface)
+	subnetBusy := inv.octets[reqOctet]
 
 	if !ifaceBusy && !subnetBusy {
 		return reqIface, reqOctet, nil, nil
@@ -150,10 +337,10 @@ func (s *Server) allocateWizardGRE(reqIface, reqSubnet, localPub, remotePub stri
 	iface = reqIface
 	octet = reqOctet
 	if ifaceBusy {
-		iface = nextFreeIface(usedIfaces)
+		iface = nextFreeIface(inv.ifaces)
 	}
 	if subnetBusy {
-		octet = nextFreeSubnet(usedOctets)
+		octet = nextFreeSubnet(inv.octets)
 	}
 
 	switch {
@@ -170,37 +357,62 @@ func (s *Server) allocateWizardGRE(reqIface, reqSubnet, localPub, remotePub stri
 	return iface, octet, warnings, nil
 }
 
-// allocateForeignIface keeps the mirrored /30 but moves the local interface
-// name when it is already taken by another tunnel on this host.
-func (s *Server) allocateForeignIface(reqIface, localPub, remotePub string) (string, []string, error) {
-	usedIfaces, _, tunnels, err := s.wizardGREState()
+// allocateForeignIface reuses an existing tunnel to the same Iran peer (env or
+// live), returning that tunnel's own private pair so the caller never rewrites
+// an established /30. Only when no such tunnel exists does it move the local
+// interface name while keeping the mirrored /30.
+func (s *Server) allocateForeignIface(reqIface, localPub, remotePub, localPriv, remotePriv string) (iface, localPrivate, remotePrivate string, warnings []string, err error) {
+	inv, err := s.wizardGREState()
 	if err != nil {
-		return "", nil, err
+		return "", "", "", nil, err
 	}
 	reqIface = strings.TrimSpace(reqIface)
 	if reqIface == "" {
 		reqIface = wizardIface
 	}
-	own := false
-	for _, t := range tunnels {
-		if (t.Iface == reqIface || t.Name == reqIface) && ownTunnel(t, localPub, remotePub) {
-			own = true
-			break
+
+	if t, exact, live, ok := findReusableTunnel(inv, localPub, remotePub); ok {
+		localPrivate, remotePrivate = t.LocalPrivateIP, t.RemotePrivateIP
+		// A single-box lab can hold the mirrored orientation; keep this
+		// role's address family local-first so the Foreign side gets `.1`
+		// and the Iran side `.2`.
+		if t.LocalPublicIP == strings.TrimSpace(remotePub) && t.RemotePublicIP == strings.TrimSpace(localPub) &&
+			localPrivate != "" && remotePrivate != "" {
+			localPrivate, remotePrivate = remotePrivate, localPrivate
 		}
+		if localPrivate == "" {
+			localPrivate = localPriv
+		}
+		if remotePrivate == "" {
+			remotePrivate = remotePriv
+		}
+		if !exact || live {
+			oct, _ := subnetOctet(localPrivate)
+			if oct > 0 {
+				warnings = append(warnings, fmt.Sprintf(
+					"reused existing GRE tunnel %s for %s (%s)", t.Iface, strings.TrimSpace(remotePub), subnetCIDR(oct)))
+			} else {
+				warnings = append(warnings, fmt.Sprintf(
+					"reused existing GRE tunnel %s for %s", t.Iface, strings.TrimSpace(remotePub)))
+			}
+		}
+		return t.Iface, localPrivate, remotePrivate, warnings, nil
 	}
-	if !usedIfaces.has(reqIface) || own {
-		return reqIface, nil, nil
+
+	if !inv.ifaces.has(reqIface) {
+		return reqIface, localPriv, remotePriv, nil, nil
 	}
-	next := nextFreeIface(usedIfaces)
-	return next, []string{fmt.Sprintf(
+	next := nextFreeIface(inv.ifaces)
+	return next, localPriv, remotePriv, []string{fmt.Sprintf(
 		"%s was busy locally; using %s with the same mirrored /30", reqIface, next)}, nil
 }
 
 // foreignSubnetConflict refuses to reuse a mirrored /30 that already belongs
 // to a different local tunnel (renaming the local iface is safe; sharing the
-// private subnet is not).
-func (s *Server) foreignSubnetConflict(localPriv, localPub, remotePub string) error {
-	_, usedOctets, tunnels, err := s.wizardGREState()
+// private subnet is not). iface is the tunnel selected for this request, so
+// its own /30 is always allowed.
+func (s *Server) foreignSubnetConflict(iface, localPriv, localPub, remotePub string) error {
+	inv, err := s.wizardGREState()
 	if err != nil {
 		return err
 	}
@@ -208,11 +420,11 @@ func (s *Server) foreignSubnetConflict(localPriv, localPub, remotePub string) er
 	if !ok {
 		return fmt.Errorf("invalid local private CIDR %q", localPriv)
 	}
-	if !usedOctets[octet] {
+	if !inv.octets[octet] {
 		return nil
 	}
-	for _, t := range tunnels {
-		if !ownTunnel(t, localPub, remotePub) {
+	for _, t := range inv.tunnels {
+		if t.Iface != iface && !ownTunnel(t, localPub, remotePub) && t.RemotePublicIP != strings.TrimSpace(remotePub) {
 			continue
 		}
 		for _, cidr := range []string{t.LocalPrivateIP, t.RemotePrivateIP} {

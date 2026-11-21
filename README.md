@@ -25,7 +25,7 @@ The installer detects the architecture, downloads the release tarball,
 installs `/usr/local/bin/frp-panel` (the whole dashboard is embedded in the
 single binary — no CDN, no Node), writes the systemd unit from inside the
 binary (`frp-panel install-unit`) and enables `frp-panel.service`.
-Flags: `--port 9000 --bind ADDR --version v1.2.4 --base URL`. The panel binds
+Flags: `--port 9000 --bind ADDR --version v1.2.5 --base URL`. The panel binds
 `0.0.0.0` (all interfaces) by default and the installer opens the port in UFW
 when it is available; pass `--bind 127.0.0.1` for loopback-only access.
 

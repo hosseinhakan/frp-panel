@@ -311,17 +311,18 @@ func (s *Server) wizardForeign(w http.ResponseWriter, req *wizardGREFRPReq) {
 		return
 	}
 
-	if err := s.foreignSubnetConflict(mp.LocalPrivateIP, mp.LocalPublicIP, mp.RemotePublicIP); err != nil {
-		writeErr(w, http.StatusConflict, "%v", err)
-		return
-	}
-	iface, ifaceWarnings, err := s.allocateForeignIface(mp.Iface, mp.LocalPublicIP, mp.RemotePublicIP)
+	iface, localPriv, remotePriv, ifaceWarnings, err := s.allocateForeignIface(
+		mp.Iface, mp.LocalPublicIP, mp.RemotePublicIP, mp.LocalPrivateIP, mp.RemotePrivateIP)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "cannot allocate GRE interface: %v", err)
 		return
 	}
+	if err := s.foreignSubnetConflict(iface, localPriv, mp.LocalPublicIP, mp.RemotePublicIP); err != nil {
+		writeErr(w, http.StatusConflict, "%v", err)
+		return
+	}
 	t, err := s.wizardTunnel(mp.LocalPublicIP, mp.RemotePublicIP, iface,
-		mp.LocalPrivateIP, mp.RemotePrivateIP, mp.MSSMode)
+		localPriv, remotePriv, mp.MSSMode)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "%v", err)
 		return

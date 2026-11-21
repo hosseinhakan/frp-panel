@@ -2226,26 +2226,116 @@ reverse_iface_busy() { # reverse_iface_busy <iface>
     return 1
 }
 
-reverse_iface_own() { # reverse_iface_own <iface> <local_pub> <remote_pub>
-    local f="$GRE_DIR/$1.env" lp="$2" rp="$3" l r
-    [[ -r "$f" && -n "$lp" && -n "$rp" ]] || return 1
-    l=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)
-    r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
-    [[ "$l" == "$lp" && "$r" == "$rp" ]]
+reverse_live_tunnels() { # -> "iface local_pub remote_pub" per live GRE tunnel
+    command -v ip >/dev/null 2>&1 || return 0
+    local line iface local_ip remote_ip i
+    local -a toks
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*([^:[:space:]]+):[[:space:]]+gre([[:space:]]|$) ]] || continue
+        iface="${BASH_REMATCH[1]}"
+        local_ip=""; remote_ip=""
+        read -r -a toks <<< "${line#*:}"
+        for ((i = 0; i < ${#toks[@]}; i++)); do
+            case "${toks[i]}" in
+                local)  local_ip="${toks[i+1]:-}" ;;
+                remote) remote_ip="${toks[i+1]:-}" ;;
+            esac
+        done
+        [[ -n "$iface" && -n "$local_ip" && -n "$remote_ip" ]] && \
+            printf '%s %s %s\n' "$iface" "$local_ip" "$remote_ip"
+    done < <(ip -d tunnel show 2>/dev/null || true)
 }
 
-reverse_find_own_iface() { # reverse_find_own_iface <local_pub> <remote_pub> -> iface
-    local lp="$1" rp="$2" f base l r
+reverse_iface_private() { # <iface> -> "local_cidr remote_cidr"
+    local iface="$1" f="$GRE_DIR/$1.env" l r
+    [[ -n "$iface" ]] || return 1
+    if [[ -r "$f" ]]; then
+        l=$(sed -n 's/^LOCAL_PRIVATE_IP=//p' "$f" | head -n1)
+        r=$(sed -n 's/^REMOTE_PRIVATE_IP=//p' "$f" | head -n1)
+        if [[ -n "$l" && -n "$r" ]]; then
+            printf '%s %s\n' "$l" "$r"
+            return 0
+        fi
+    fi
+    l="$(ip -o -4 addr show dev "$iface" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="inet"){print $(i+1); exit}}')"
+    [[ -n "$l" ]] || return 1
+    r="$(awk -F'[./]' '{
+        if ($4 == 1) printf "%s.%s.%s.2/30\n", $1, $2, $3;
+        else if ($4 == 2) printf "%s.%s.%s.1/30\n", $1, $2, $3;
+    }' <<< "$l")"
+    [[ -n "$r" ]] || return 1
+    printf '%s %s\n' "$l" "$r"
+}
+
+reverse_iface_octet() { # <iface> -> third octet of its /30
+    local lp rp
+    read -r lp rp < <(reverse_iface_private "$1") || return 1
+    [[ -n "$lp" ]] || return 1
+    awk -F. '{print $3}' <<< "$lp"
+}
+
+reverse_iface_own() { # reverse_iface_own <iface> <local_pub> <remote_pub> (exact pair)
+    local iface="$1" lp="$2" rp="$3" f="$GRE_DIR/$1.env" l r live_iface live_lp live_rp
+    [[ -n "$iface" && -n "$lp" && -n "$rp" ]] || return 1
+    if [[ -r "$f" ]]; then
+        l=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)
+        r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
+        if [[ "$l" == "$lp" && "$r" == "$rp" ]] || [[ "$l" == "$rp" && "$r" == "$lp" ]]; then
+            return 0
+        fi
+    fi
+    while read -r live_iface live_lp live_rp; do
+        [[ "$live_iface" == "$iface" ]] || continue
+        if [[ "$live_lp" == "$lp" && "$live_rp" == "$rp" ]] || [[ "$live_lp" == "$rp" && "$live_rp" == "$lp" ]]; then
+            return 0
+        fi
+    done < <(reverse_live_tunnels)
+    return 1
+}
+
+reverse_iface_reusable() { # reverse_iface_reusable <iface> <remote_pub> (same remote endpoint)
+    local iface="$1" rp="$2" f="$GRE_DIR/$1.env" r live_iface live_lp live_rp
+    [[ -n "$iface" && -n "$rp" ]] || return 1
+    if [[ -r "$f" ]]; then
+        r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
+        [[ "$r" == "$rp" ]] && return 0
+    fi
+    while read -r live_iface live_lp live_rp; do
+        [[ "$live_iface" == "$iface" && "$live_rp" == "$rp" ]] && return 0
+    done < <(reverse_live_tunnels)
+    return 1
+}
+
+reverse_find_reusable_iface() { # reverse_find_reusable_iface <local_pub> <remote_pub> -> iface
+    local lp="$1" rp="$2" f base l r iface live_lp live_rp
     [[ -n "$lp" && -n "$rp" ]] || return 1
+    # 1) exact pair in an env file (either orientation)
     for f in "$GRE_DIR"/*.env; do
         [[ -e "$f" ]] || continue
         l=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$f" | head -n1)
         r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
         if [[ "$l" == "$lp" && "$r" == "$rp" ]] || [[ "$l" == "$rp" && "$r" == "$lp" ]]; then
-            base="$(basename "$f" .env)"
-            echo "$base"
+            basename "$f" .env
             return 0
         fi
+    done
+    # 2) live kernel tunnel with the exact pair (either orientation)
+    while read -r iface live_lp live_rp; do
+        [[ -n "$iface" ]] || continue
+        if [[ "$live_lp" == "$lp" && "$live_rp" == "$rp" ]] || [[ "$live_lp" == "$rp" && "$live_rp" == "$lp" ]]; then
+            echo "$iface"
+            return 0
+        fi
+    done < <(reverse_live_tunnels)
+    # 3) same remote endpoint (the local public IP changed)
+    while read -r iface live_lp live_rp; do
+        [[ -n "$iface" ]] || continue
+        [[ "$live_rp" == "$rp" ]] && { echo "$iface"; return 0; }
+    done < <(reverse_live_tunnels)
+    for f in "$GRE_DIR"/*.env; do
+        [[ -e "$f" ]] || continue
+        r=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$f" | head -n1)
+        [[ "$r" == "$rp" ]] && { basename "$f" .env; return 0; }
     done
     return 1
 }
@@ -2283,7 +2373,7 @@ reverse_alloc_gre() { # req_iface req_octet [own_local_pub own_remote_pub] -> "i
     local iface octet msg="" own_iface=0 own_oct=0
     if [[ -n "$own_lp" ]] && reverse_iface_own "$req_iface" "$own_lp" "$own_rp"; then
         own_iface=1
-        if [[ "$(sed -n 's/^LOCAL_PRIVATE_IP=10\.100\.\([0-9][0-9]*\)\..*/\1/p' "$GRE_DIR/$req_iface.env" | head -n1)" == "$req_octet" ]]; then
+        if [[ "$(reverse_iface_octet "$req_iface" 2>/dev/null || true)" == "$req_octet" ]]; then
             own_oct=1
         fi
     fi
@@ -2368,16 +2458,33 @@ reverse_iran_do() {
         *) print_error "Invalid MSS mode: $mss"; return 1 ;;
     esac
 
-    local req_octet=111 own_octet="" alloc_warn req_port own_port own_iface
-    if own_iface="$(reverse_find_own_iface "$iran" "$foreign")"; then
+    local req_octet=111 own_octet="" alloc_warn req_port own_port own_iface reused=0
+    if own_iface="$(reverse_find_reusable_iface "$iran" "$foreign")"; then
         iface="$own_iface"
     fi
     if reverse_iface_own "$iface" "$iran" "$foreign"; then
-        own_octet="$(sed -n 's/^LOCAL_PRIVATE_IP=10\.100\.\([0-9][0-9]*\)\..*/\1/p' "$GRE_DIR/$iface.env" | head -n1)"
-        [[ -n "$own_octet" ]] && req_octet="$own_octet"
+        # Exact pair: a rerun refreshes this tunnel silently.
+        if ! own_octet="$(reverse_iface_octet "$iface")"; then
+            print_error "existing GRE tunnel $iface for $foreign has no IPv4 /30 — delete it or assign one first."
+            return 1
+        fi
+        req_octet="$own_octet"
+    elif reverse_iface_reusable "$iface" "$foreign"; then
+        # Same Foreign endpoint, local public IP changed: reuse the live
+        # interface and its /30 instead of adding a duplicate keyless GRE.
+        if own_octet="$(reverse_iface_octet "$iface")"; then
+            req_octet="$own_octet"
+            reused=1
+            print_warning "reused existing GRE tunnel $iface for $foreign (10.100.$req_octet.0/30)"
+        else
+            print_error "existing GRE tunnel $iface for $foreign has no IPv4 /30 — delete it or assign one first."
+            return 1
+        fi
     fi
-    read -r iface req_octet alloc_warn <<< "$(reverse_alloc_gre "$iface" "$req_octet" "$iran" "$foreign")"
-    [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
+    if [[ $reused -eq 0 ]]; then
+        read -r iface req_octet alloc_warn <<< "$(reverse_alloc_gre "$iface" "$req_octet" "$iran" "$foreign")"
+        [[ -n "$alloc_warn" ]] && print_warning "$alloc_warn"
+    fi
     req_port="$port"
     if [[ -n "$own_octet" ]] && own_port="$(reverse_own_port "$req_octet")"; then
         port="$own_port"
@@ -2485,11 +2592,33 @@ reverse_foreign_do() {
     esac
     if ! expand_port_input "$ports"; then return 1; fi
 
-    local cfg tmp p web_port web_pass alloc_warn own_iface
-    if own_iface="$(reverse_find_own_iface "$lp" "$rp")"; then
+    local cfg tmp p web_port web_pass alloc_warn own_iface reused=0 oct
+    if own_iface="$(reverse_find_reusable_iface "$lp" "$rp")"; then
         iface="$own_iface"
     fi
-    if reverse_iface_busy "$iface" && ! reverse_iface_own "$iface" "$lp" "$rp"; then
+    if reverse_iface_own "$iface" "$lp" "$rp" || reverse_iface_reusable "$iface" "$rp"; then
+        # The same public pair, or the same Iran endpoint after the local
+        # public IP changed: reuse the existing interface and its /30 instead
+        # of adding a duplicate keyless GRE (`File exists`).
+        if read -r lpriv rpriv < <(reverse_iface_private "$iface"); then
+            # Keep the Foreign side local-first if the env is mirrored.
+            local env_lp env_rp tmp_priv
+            env_lp=$(sed -n 's/^LOCAL_PUBLIC_IP=//p' "$GRE_DIR/$iface.env" 2>/dev/null | head -n1)
+            env_rp=$(sed -n 's/^REMOTE_PUBLIC_IP=//p' "$GRE_DIR/$iface.env" 2>/dev/null | head -n1)
+            if [[ "$env_lp" == "$rp" && "$env_rp" == "$lp" ]]; then
+                tmp_priv="$lpriv"; lpriv="$rpriv"; rpriv="$tmp_priv"
+            fi
+            if ! reverse_iface_own "$iface" "$lp" "$rp"; then
+                reused=1
+                oct="$(awk -F. '{print $3}' <<< "${lpriv%%/*}")"
+                print_warning "reused existing GRE tunnel $iface for $rp (10.100.$oct.0/30)"
+            fi
+        else
+            print_error "existing GRE tunnel $iface for $rp has no IPv4 /30 — delete it or assign one first."
+            return 1
+        fi
+    fi
+    if [[ $reused -eq 0 ]] && reverse_iface_busy "$iface" && ! reverse_iface_own "$iface" "$lp" "$rp"; then
         local new_iface
         new_iface="$(reverse_next_iface)"
         alloc_warn="$iface was busy locally; using $new_iface with the same mirrored /30"

@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.2.5 — reuse an existing GRE tunnel for a repeated public pair
+
+### Fixed
+
+- **No more `add tunnel "gre0" failed: File exists`.** Both the Iran and the
+  Foreign wizard (and the `frp-manager reverse` CLI) now scan the live kernel
+  tunnels (`ip -d tunnel show`) in addition to `/root/frp/gre/*.env`. When the
+  requested `(local_public, remote_public)` pair already has a GRE interface —
+  exact match, mirrored orientation, or the same remote public IP after the
+  local public IP changed — that interface and its existing `10.100.<n>.0/30`
+  are reused instead of allocating a duplicate `gt12`. A clear warning is
+  returned: `reused existing GRE tunnel gt11 for 206.1.100.7`.
+- **A live-only tunnel is honoured.** A GRE interface created manually or by an
+  interrupted wizard run has no `.env`; it is still discovered, and its private
+  `/30` is read from `ip -o -4 addr show dev <iface>`. If that tunnel has no
+  IPv4 `/30`, the wizard now fails with an actionable message rather than
+  creating a duplicate.
+- The Foreign wizard previously validated the mirrored `/30` before choosing
+  the reused interface; the conflict check now runs against the selected
+  interface, so a legitimate reuse is never rejected.
+
+### CLI
+
+- `reverse_live_tunnels`, `reverse_iface_private`, `reverse_iface_own`,
+  `reverse_iface_reusable` and `reverse_find_reusable_iface` mirror the panel
+  logic. `frp-manager reverse --iran|--foreign` prints
+  `reused existing GRE tunnel gt11 for <remote-ip> (10.100.<n>.0/30)` and keeps
+  the established `/30`.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`,
+  `scripts/check-sync.sh`.
+- New regression tests: `TestParseLiveGRETunnels`, `TestPeerPrivateCIDR`,
+  `TestWizardIranReusesLiveTunnelForRemote`,
+  `TestWizardIranReusesTunnelWhenLocalPublicChanged` and
+  `TestWizardForeignReusesLiveTunnelForRemote`.
+
 ## v1.2.4 — systemctl `--now` fix + paste-friendly Foreign payload
 
 ### Fixed

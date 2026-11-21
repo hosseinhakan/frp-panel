@@ -724,6 +724,146 @@ func TestWizardRolesNeverPassNowFlag(t *testing.T) {
 	}
 }
 
+func TestParseLiveGRETunnels(t *testing.T) {
+	out := "gt11: gre remote 206.1.100.7 local 5.6.7.8 dev eth0 ttl inherit\n" +
+		"gt12: gre remote 203.0.113.9 local 198.51.100.4 dev eth1\n" +
+		"eth0: <BROADCAST,MULTICAST,UP> mtu 1500\n"
+	got := parseLiveGRETunnels(out)
+	if len(got) != 2 {
+		t.Fatalf("parsed %d tunnels, want 2: %+v", len(got), got)
+	}
+	if got[0].Iface != "gt11" || got[0].LocalPublicIP != "5.6.7.8" || got[0].RemotePublicIP != "206.1.100.7" {
+		t.Errorf("gt11 = %+v", got[0])
+	}
+	if got[1].Iface != "gt12" || got[1].LocalPublicIP != "198.51.100.4" || got[1].RemotePublicIP != "203.0.113.9" {
+		t.Errorf("gt12 = %+v", got[1])
+	}
+}
+
+func TestPeerPrivateCIDR(t *testing.T) {
+	cases := map[string]string{
+		"10.100.111.1/30": "10.100.111.2/30",
+		"10.100.111.2/30": "10.100.111.1/30",
+		"10.100.7.2/30":   "10.100.7.1/30",
+	}
+	for in, want := range cases {
+		if got, ok := peerPrivateCIDR(in); !ok || got != want {
+			t.Errorf("peerPrivateCIDR(%q) = %q,%v want %q", in, got, ok, want)
+		}
+	}
+	if _, ok := peerPrivateCIDR("10.100.111.5/30"); ok {
+		t.Error("host .5 is not a usable /30 endpoint")
+	}
+}
+
+func TestWizardIranReusesLiveTunnelForRemote(t *testing.T) {
+	e := newTestEnv(t)
+	e.runner.execOut["ip -d tunnel show"] =
+		"gt11: gre remote 5.6.7.8 local 1.2.3.4 dev eth0 ttl inherit\n"
+	e.runner.execOut["ip -o -4 addr show dev gt11"] =
+		"2: gt11    inet 10.100.111.2/30 scope global gt11\\       valid_lft forever preferred_lft forever\n"
+	e.runner.active["gre-tunnel@gt11"] = "active"
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","enableWatchdog":false}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt11" {
+		t.Errorf("iface = %v, want the live gt11 (no duplicate gt12)", tunnel["iface"])
+	}
+	if tunnel["local_private_ip"] != "10.100.111.2/30" || tunnel["remote_private_ip"] != "10.100.111.1/30" {
+		t.Errorf("private pair = %v/%v", tunnel["local_private_ip"], tunnel["remote_private_ip"])
+	}
+	server, _ := resp["server"].(map[string]any)
+	if server["bindAddr"] != "10.100.111.2" || server["bindPort"] != float64(7025) {
+		t.Errorf("server = %v", server)
+	}
+	warnings, _ := resp["warnings"].([]any)
+	joined := ""
+	for _, w := range warnings {
+		joined += w.(string) + "\n"
+	}
+	if !strings.Contains(joined, "reused existing GRE tunnel gt11 for 5.6.7.8") {
+		t.Errorf("warnings = %q, want the GRE reuse notice", joined)
+	}
+	env, err := os.ReadFile(filepath.Join(e.srv.paths.GREDir, "gt11.env"))
+	if err != nil {
+		t.Fatalf("gre env missing: %v", err)
+	}
+	if !strings.Contains(string(env), "LOCAL_PUBLIC_IP=1.2.3.4") {
+		t.Errorf("env not rewritten with the requested pair:\n%s", env)
+	}
+}
+
+func TestWizardIranReusesTunnelWhenLocalPublicChanged(t *testing.T) {
+	e := newTestEnv(t)
+	// The env was written when the Iran node had a different public IP, but
+	// the remote (Foreign) endpoint is unchanged: reuse it and keep its /30.
+	seedWizardTunnel(t, e, "gt11", "9.9.9.9", "5.6.7.8", "120")
+
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"iran","iranPublicIp":"1.2.3.4","foreignPublicIp":"5.6.7.8","enableWatchdog":false}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("iran = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt11" || tunnel["local_private_ip"] != "10.100.120.2/30" {
+		t.Errorf("reuse = %v, want gt11 / 10.100.120.2/30", tunnel)
+	}
+	warnings, _ := resp["warnings"].([]any)
+	joined := ""
+	for _, w := range warnings {
+		joined += w.(string) + "\n"
+	}
+	if !strings.Contains(joined, "reused existing GRE tunnel gt11 for 5.6.7.8") {
+		t.Errorf("warnings = %q, want the GRE reuse notice", joined)
+	}
+	env, err := os.ReadFile(filepath.Join(e.srv.paths.GREDir, "gt11.env"))
+	if err != nil {
+		t.Fatalf("gre env missing: %v", err)
+	}
+	if !strings.Contains(string(env), "LOCAL_PUBLIC_IP=1.2.3.4") {
+		t.Errorf("env still has the stale local public IP:\n%s", env)
+	}
+}
+
+func TestWizardForeignReusesLiveTunnelForRemote(t *testing.T) {
+	e := newTestEnv(t)
+	e.runner.execOut["ip -d tunnel show"] =
+		"gt11: gre remote 1.2.3.4 local 5.6.7.8 dev eth0 ttl inherit\n"
+	e.runner.execOut["ip -o -4 addr show dev gt11"] =
+		"2: gt11    inet 10.100.111.1/30 scope global gt11\\       valid_lft forever preferred_lft forever\n"
+	e.runner.active["gre-tunnel@gt11"] = "active"
+
+	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
+		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
+		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
+	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
+		`{"role":"foreign","mirrorPayload":`+jsonQuote(payload)+
+			`,"localPorts":"443","proto":"tcp","enableWatchdog":false}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("foreign = %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := jsonMap(t, rec)
+	tunnel, _ := resp["tunnel"].(map[string]any)
+	if tunnel["iface"] != "gt11" || tunnel["local_private_ip"] != "10.100.111.1/30" {
+		t.Errorf("reuse = %v, want gt11 / 10.100.111.1/30", tunnel)
+	}
+	warnings, _ := resp["warnings"].([]any)
+	joined := ""
+	for _, w := range warnings {
+		joined += w.(string) + "\n"
+	}
+	if !strings.Contains(joined, "reused existing GRE tunnel gt11 for 1.2.3.4") {
+		t.Errorf("warnings = %q, want the GRE reuse notice", joined)
+	}
+}
+
 func jsonQuote(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')

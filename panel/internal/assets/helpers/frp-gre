@@ -32,7 +32,7 @@ load_env() {
     [[ -n "$LOCAL_PUBLIC_IP" && -n "$REMOTE_PUBLIC_IP" && -n "$IFACE" \
        && -n "$LOCAL_PRIVATE_IP" && -n "$REMOTE_PRIVATE_IP" ]] \
         || { echo "frp-gre: $env_file is missing required fields" >&2; exit 1; }
-    MTU="${MTU:-1400}"
+    MTU="${MTU:-1320}"
     MSS_MODE="${MSS_MODE:-clamp}"
 }
 
@@ -64,7 +64,7 @@ notrack_purge() {
     ipt_purge raw "$1" -p 47 -j NOTRACK
 }
 
-mss_rules() { # TCPMSS clamping on the GRE interface, both directions
+mss_rules() { # TCPMSS clamping on the GRE interface + host-local traffic
     case "$MSS_MODE" in
         clamp|1360|1240|1220) ;;
         off) return 0 ;;
@@ -76,6 +76,15 @@ mss_rules() { # TCPMSS clamping on the GRE interface, both directions
     ipt_ensure mangle FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $args
     # shellcheck disable=SC2086
     ipt_ensure mangle FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $args
+    # frps/frpc on THIS host originate their SYN via OUTPUT → POSTROUTING, which
+    # bypasses FORWARD. Without this rule PMTUD blackholes stall the control
+    # channel. Always pin a safe MSS (1220) rather than relying on PMTUD.
+    local local_mss
+    case "$MSS_MODE" in
+        1360|1240|1220) local_mss="$MSS_MODE" ;;
+        *) local_mss="1220" ;;
+    esac
+    ipt_ensure mangle POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$local_mss"
 }
 
 mss_purge() { # remove every MSS variant for this interface
@@ -85,6 +94,8 @@ mss_purge() { # remove every MSS variant for this interface
         ipt_purge mangle FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $variant
         # shellcheck disable=SC2086
         ipt_purge mangle FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $variant
+        # shellcheck disable=SC2086
+        ipt_purge mangle POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS $variant
     done
 }
 
@@ -102,11 +113,33 @@ forward_purge() {
 disable_rp_filter() { # never let reverse GRE packets be dropped by rp_filter
     local key
     for key in net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter \
-               "net.ipv4.conf.${IFACE}.rp_filter"; do
-        if ! sysctl -w "${key}=0" >/dev/null 2>&1; then
-            echo "frp-gre: warning: could not set ${key}=0" >&2
+               "net.ipv4.conf.${IFACE}.rp_filter" \
+               net.ipv4.tcp_mtu_probing net.ipv4.tcp_base_mss; do
+        local want=0
+        case "$key" in
+            *.tcp_mtu_probing) want=1 ;;
+            *.tcp_base_mss) want=1024 ;;
+        esac
+        if ! sysctl -w "${key}=${want}" >/dev/null 2>&1; then
+            echo "frp-gre: warning: could not set ${key}=${want}" >&2
         fi
     done
+}
+
+purge_remote_conflicts() {
+    # A keyless GRE cannot have two interfaces with the same remote endpoint;
+    # a stale/manual tunnel makes `ip tunnel add` fail with "File exists".
+    # Remove any other interface already pointed at this remote.
+    local name
+    while read -r name; do
+        [[ -n "$name" && "$name" != "$IFACE" ]] || continue
+        echo "frp-gre: removing stale GRE $name (same remote $REMOTE_PUBLIC_IP)"
+        ip tunnel del "$name" 2>/dev/null || ip link del "$name" 2>/dev/null || true
+    done < <(ip -d tunnel show 2>/dev/null | awk -v r="$REMOTE_PUBLIC_IP" '
+        $2 == "gre" {
+            name = $1; sub(/:$/, "", name)
+            for (i = 3; i < NF; i++) if ($i == "remote" && $(i + 1) == r) { print name; break }
+        }')
 }
 
 cmd_up() {
@@ -114,6 +147,7 @@ cmd_up() {
     if ip link show "$IFACE" >/dev/null 2>&1; then
         echo "frp-gre: interface $IFACE already exists, refreshing rules"
     else
+        purge_remote_conflicts
         ip tunnel add "$IFACE" mode gre local "$LOCAL_PUBLIC_IP" remote "$REMOTE_PUBLIC_IP" ttl 255
     fi
     ip addr replace "$LOCAL_PRIVATE_IP" dev "$IFACE" 2>/dev/null || true

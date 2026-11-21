@@ -59,10 +59,19 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		`parseNumberRangePair "8989,8443" "8989,8443"`,
 		`name = "tcp-{{ $v.First }}"`,
 		"transport.dialServerTimeout = 10",
-		"transport.dialServerKeepalive = 120",
-		"transport.poolCount = 20",
-		"transport.heartbeatInterval = 30",
-		"transport.heartbeatTimeout = 90",
+		"transport.dialServerKeepalive = 30",
+		"transport.poolCount = 10",
+		"transport.heartbeatInterval = 15",
+		"transport.heartbeatTimeout = 45",
+		// Anti-disconnect hardening: local SYN MSS, protocol-47 NOTRACK,
+		// rp_filter/MTU probing, and a duplicate-GRE guard before ip tunnel add.
+		`iptables -t mangle -A POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220`,
+		`iptables -t raw -A PREROUTING -p 47 -j NOTRACK`,
+		`iptables -t raw -A OUTPUT -p 47 -j NOTRACK`,
+		`net.ipv4.conf."$IFACE".rp_filter=0`,
+		"net.ipv4.tcp_mtu_probing=1",
+		"ip -d tunnel show", // stale GRE with the same remote is removed first
+		"purge_remote_conflicts",
 		"/usr/local/bin/frpc",
 		"net.core.default_qdisc=fq", // BBR + fq tuning
 		"pkill -10 -x frpc",         // 3h GC cron

@@ -145,13 +145,15 @@ separate database to drift. The panel's only private state is `/etc/frp-panel/pa
 bindAddr = "10.100.111.2"          # was hardcoded "::"; now prompted:
                                    #   0.0.0.0 | :: | private tunnel IP (validated against `ip -o addr`)
 bindPort = 7000
+proxyBindAddr = "0.0.0.0"          # emitted whenever bindAddr is a specific (GRE) IP:
+                                   #   the control port stays private, forwarded ports stay public
 quicBindPort = 7000                  # or kcpBindPort (unchanged logic)
 
-transport.heartbeatTimeout = 90
+transport.heartbeatTimeout = 45
 transport.maxPoolCount = 65535
 transport.tcpMux = false
 transport.tcpMuxKeepaliveInterval = 10
-transport.tcpKeepalive = 120
+transport.tcpKeepalive = 30
 
 auth.method = "token"
 auth.token = "K7mQz2xVb9LrT4nY8wPd3cJ6hFgA1sEu"   # 32-char crypto-random, generated + shown once
@@ -176,10 +178,10 @@ auth.token = "<paste from server setup / picked via panel dropdown>"
 transport.protocol = "tcp"           # tcp | websocket | quic | kcp (unchanged)
 transport.tcpMux = false
 transport.dialServerTimeout = 10
-transport.dialServerKeepalive = 120
-transport.poolCount = 20
-transport.heartbeatInterval = 30
-transport.heartbeatTimeout = 90
+transport.dialServerKeepalive = 30
+transport.poolCount = 10
+transport.heartbeatInterval = 15
+transport.heartbeatTimeout = 45
 transport.tls.enable = true           # CHANGED default (was false)
 transport.useEncryption = true       # NEW default per-proxy (see below)
 transport.useCompression = false     # RAM-saving default (unchanged)
@@ -300,7 +302,7 @@ the console + written nowhere else; first login forces a password change (bcrypt
 |---|---|---|
 | POST | `/api/auth/login` / `/api/auth/logout` / GET `/api/auth/me` | session lifecycle, first-login flag |
 | GET | `/api/overview` | node summary: uptime, CPU/RAM, BBR/zram state, service + tunnel roll-up |
-| GET/POST | `/api/servers` | list / create frps instance (wizard payload: port, protocol, mux, bindAddr choice) |
+| GET/POST | `/api/servers` | list / create frps instance (wizard payload: port, protocol, mux, bindAddr + optional proxyBindAddr) |
 | GET/PUT/DELETE | `/api/servers/{name}` | read / update / remove (config + unit disable); the update body covers every transport tunable and an optional `restart` flag |
 | POST | `/api/servers/{name}/token/regenerate` | new random token (+ optional propagate) |
 | POST | `/api/servers/{name}/foreign-script` | self-contained Foreign installer (GRE helper + units + frpc download + matching TOML) for a linked GRE tunnel or caller-supplied public IPs |
@@ -479,9 +481,9 @@ P8 implementation notes:
 |---|---|
 | Login | centered card, one-time password notice, error shake, lockout hint |
 | Dashboard | node role badge (Iran/Foreign/standalone) + uptime; CPU/RAM/net sparklines; GRE + FRP status cards with quick restart; live latency chart (uPlot, per target); recent watchdog events |
-| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign-setup/toml); edit always opens (raw modal only for non-range templates/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **Foreign Setup** generates the one-click installer |
+| Servers | table: instance, port, protocol, webServer port, status pill, uptime, actions (start/stop/restart/edit/retoken/foreign-setup/toml); edit always opens (raw modal only for non-range templates/unparseable files, merge-preserving form for valid TOML) and exposes every transport field (`tcpMux`, `tcpMuxKeepaliveInterval`, `heartbeatTimeout`, `tcpKeepalive`, `maxPoolCount`, QUIC block) plus a restart-after-save checkbox; **bindAddr is a free-form input with suggestions**, so `0.0.0.0` / `::` / any GRE IP round-trips exactly; **proxyBindAddr defaults to `0.0.0.0`** whenever bindAddr is a private/GRE IP so forwarded ports stay public; **Foreign Setup** generates the one-click installer |
 | Clients | instances + proxy table with **tcp/udp type badges**; comma-separated port list with ranges (`8989,8443,6000-6005`) and a single TCP / TCP+UDP selector (edit replaces the list in place and keeps the compact `parseNumberRangePair` layout); edit exposes `loginFailExit`, `tcpMuxKeepaliveInterval`, `dialServerTimeout`, `dialServerKeepalive`, `poolCount`, `heartbeatInterval`, `heartbeatTimeout`, QUIC, TLS, per-proxy encryption/compression and restart-after-save; **Raw speed** forces TLS/FRP encryption/compression/tcpMux off; wizard: server token picker (reads local server TOMLs) or paste |
-| GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1400); **mirror-config** generator for the far node; delete with teardown confirmation |
+| GRE | tunnel cards: iface, private pair, MTU, status, peer latency, tx/rx counters; create form with all six inputs + defaults (`gt11`, `10.100.111.1/30`, `…2/30`, MTU 1320); **mirror-config** generator for the far node; the helper clamps local SYN MSS to 1220, NOTRACKs protocol 47 and relaxes rp_filter/MTU probing; delete with teardown confirmation |
 | Turbo | BBR/fq/sysctl current-vs-turbo diff table; one-click **Apply**; ZRAM card (size, lz4, on/off); **System utilities** card: 3h FRP GC cron (+ badge), volatile journald logs, clear all logs |
 | Logs | unit picker (frps@*/frpc@*/gre-turbo/watchdog), live SSE pane, pause/follow, level filter, colored timestamps |
 | Stats | per-instance: active conns, traffic in/out per proxy (from FRP webServer), 24 h history graph |
@@ -499,7 +501,7 @@ REMOTE_PUBLIC_IP=5.6.7.8
 IFACE=gt11                 # default gt11, validated ^gt?[0-9]+$
 LOCAL_PRIVATE_IP=10.100.111.1/30
 REMOTE_PRIVATE_IP=10.100.111.2/30
-MTU=1400
+MTU=1320
 MSS_MODE=clamp             # clamp | 1360 | 1240 | 1220 | off
 ```
 
@@ -510,6 +512,7 @@ MSS_MODE=clamp             # clamp | 1360 | 1240 | 1220 | off
 Description=GRE tunnel %i
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -517,28 +520,37 @@ RemainAfterExit=yes
 ExecStart=/usr/local/bin/frp-gre up %i
 ExecStop=/usr/local/bin/frp-gre down %i
 ExecReload=/usr/local/bin/frp-gre reload %i
+Restart=always
+RestartSec=3s
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`frp-gre up <name>` (idempotent — safe on restart/boot):
+`frp-gre up <name>` (idempotent — safe on restart/boot; first removes any other
+keyless GRE already pointing at the same remote so `ip tunnel add` cannot fail
+with `File exists`):
 
 ```
 ip tunnel add gt11 mode gre local <LOCAL_PUBLIC_IP> remote <REMOTE_PUBLIC_IP> ttl 255
 ip addr add <LOCAL_PRIVATE_IP> dev gt11
-ip link set gt11 up mtu 1400
+ip link set gt11 up mtu 1320
 # conntrack bypass for GRE (proto 47):
 iptables -t raw -A PREROUTING -p 47 -j CT --notrack   # fallback: -j NOTRACK on old iptables
 iptables -t raw -A OUTPUT      -p 47 -j CT --notrack
 # MSS clamping both directions:
 iptables -t mangle -A FORWARD -o gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 iptables -t mangle -A FORWARD -i gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+# host-originated SYN (OUTPUT → POSTROUTING bypasses FORWARD): always pin 1220
+iptables -t mangle -A POSTROUTING -o gt11 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220
 # (MSS_MODE=1240|1220 swaps --clamp-mss-to-pmtu for --set-mss <value>)
+sysctl -w net.ipv4.conf.gt11.rp_filter=0 net.ipv4.conf.all.rp_filter=0
+sysctl -w net.ipv4.tcp_mtu_probing=1 net.ipv4.tcp_base_mss=1024
 # FORWARD accept pair if default policy is DROP; remote-private route implicit via /30 addr
 ```
 
-`down` = exact inverse (del rules by spec, `ip tunnel del`); `reload` = down+up.
+`down` = exact inverse (del rules by spec, including the POSTROUTING MSS rule,
+`ip tunnel del`); `reload` = down+up.
 Both CLI and panel only ever write the `.env` and enable/start the unit. The CLI
 uses `systemctl enable --now`; the panel issues explicit `enable` + `restart`
 (`svc.Systemctl` rejects every argument beginning with `-`), then reads status

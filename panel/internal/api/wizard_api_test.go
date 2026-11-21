@@ -40,7 +40,7 @@ func TestWizardIranCreatesEntryAndMirror(t *testing.T) {
 	if tunnel["local_private_ip"] != "10.100.111.2/30" || tunnel["remote_private_ip"] != "10.100.111.1/30" {
 		t.Errorf("entry private pair = %v/%v", tunnel["local_private_ip"], tunnel["remote_private_ip"])
 	}
-	if tunnel["mtu"] != float64(1400) {
+	if tunnel["mtu"] != float64(1320) {
 		t.Errorf("mtu = %v", tunnel["mtu"])
 	}
 	if tunnel["mss_mode"] != "1220" {
@@ -151,7 +151,7 @@ func TestWizardForeignRawSpeed(t *testing.T) {
 	e := newTestEnv(t)
 	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"MTU=1320\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
 		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) +
 		`,"localPorts":"443","proto":"tcp","rawSpeed":true}`
@@ -190,7 +190,7 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		"REMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\n" +
 		"REMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\n" +
+		"MTU=1320\nMSS_MODE=1220\n" +
 		"SERVER_ADDR=10.100.111.2\nCONTROL_PORT=7025\nPROTOCOL=tcp\n" +
 		"TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) + `,"localPorts":"443,2053","proto":"tcp"}`
@@ -235,10 +235,10 @@ func TestWizardForeignFromMirrorPayload(t *testing.T) {
 		`localPort = {{ $v.First }}`,
 		`remotePort = {{ $v.Second }}`,
 		`transport.dialServerTimeout = 10`,
-		`transport.dialServerKeepalive = 120`,
-		`transport.poolCount = 20`,
-		`transport.heartbeatInterval = 30`,
-		`transport.heartbeatTimeout = 90`,
+		`transport.dialServerKeepalive = 30`,
+		`transport.poolCount = 10`,
+		`transport.heartbeatInterval = 15`,
+		`transport.heartbeatTimeout = 45`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("frpc config missing %q:\n%s", want, raw)
@@ -385,7 +385,7 @@ func seedWizardTunnel(t *testing.T, e *testEnv, iface, localPub, remotePub, octe
 		RemotePublicIP:  remotePub,
 		LocalPrivateIP:  "10.100." + octet + ".2/30",
 		RemotePrivateIP: "10.100." + octet + ".1/30",
-		MTU:             1400,
+		MTU:             1320,
 		MSSMode:         "1220",
 	}); err != nil {
 		t.Fatal(err)
@@ -531,7 +531,7 @@ func TestWizardForeignRerunRefreshesClient(t *testing.T) {
 		"REMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\n" +
 		"REMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\n" +
+		"MTU=1320\nMSS_MODE=1220\n" +
 		"SERVER_ADDR=10.100.111.2\nCONTROL_PORT=7025\nPROTOCOL=tcp\n" +
 		"TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	body := `{"role":"foreign","mirrorPayload":` + jsonQuote(payload) + `,"localPorts":"443,2053","proto":"tcp"}`
@@ -576,7 +576,7 @@ func TestWizardForeignIfaceFallbackKeepsMirroredSubnet(t *testing.T) {
 		"REMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\n" +
 		"REMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\n" +
+		"MTU=1320\nMSS_MODE=1220\n" +
 		"SERVER_ADDR=10.100.111.2\nCONTROL_PORT=7025\nPROTOCOL=tcp\n" +
 		"TOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
@@ -610,7 +610,7 @@ IRAN_PUBLIC_IP='1.2.3.4'
 FOREIGN_PUBLIC_IP='5.6.7.8'
 IRAN_PRIVATE_IP='10.100.111.2/30'
 FOREIGN_PRIVATE_IP='10.100.111.1/30'
-MTU='1400'
+MTU='1320'
 MSS_MODE='1220'
 SERVER_ADDR='10.100.111.2'
 SERVER_PORT='7025'
@@ -649,7 +649,7 @@ func TestParseMirrorPayloadAcceptsForeignInstaller(t *testing.T) {
 	if mp.ServerAddr != "10.100.111.2" || mp.ControlPort != 7025 || mp.Protocol != "tcp" {
 		t.Errorf("control link = %+v", mp)
 	}
-	if mp.MTU != 1400 || mp.MSSMode != "1220" {
+	if mp.MTU != 1320 || mp.MSSMode != "1220" {
 		t.Errorf("mtu/mss = %+v", mp)
 	}
 	if mp.Token != "abcdefghijklmnopqrstuvwxyz012345" {
@@ -703,7 +703,7 @@ func TestWizardRolesNeverPassNowFlag(t *testing.T) {
 	}
 	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"MTU=1320\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
 		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	if rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
 		`{"role":"foreign","mirrorPayload":`+jsonQuote(payload)+
@@ -841,7 +841,7 @@ func TestWizardForeignReusesLiveTunnelForRemote(t *testing.T) {
 
 	payload := "IFACE=gt11\nLOCAL_PUBLIC_IP=5.6.7.8\nREMOTE_PUBLIC_IP=1.2.3.4\n" +
 		"LOCAL_PRIVATE_IP=10.100.111.1/30\nREMOTE_PRIVATE_IP=10.100.111.2/30\n" +
-		"MTU=1400\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
+		"MTU=1320\nMSS_MODE=1220\nSERVER_ADDR=10.100.111.2\n" +
 		"CONTROL_PORT=7025\nPROTOCOL=tcp\nTOKEN=abcdefghijklmnopqrstuvwxyz012345\n"
 	rec := e.authorized(http.MethodPost, "/api/wizard/gre-frp",
 		`{"role":"foreign","mirrorPayload":`+jsonQuote(payload)+

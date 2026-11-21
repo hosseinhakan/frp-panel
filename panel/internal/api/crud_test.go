@@ -619,8 +619,8 @@ func TestServerEditExposesAllTransportFields(t *testing.T) {
 	}
 	for field, want := range map[string]float64{
 		"tcpMuxKeepaliveInterval": 10,
-		"heartbeatTimeout":        90,
-		"tcpKeepalive":            120,
+		"heartbeatTimeout":        45,
+		"tcpKeepalive":            30,
 		"maxPoolCount":            65535,
 		"quicKeepalivePeriod":     10,
 		"quicMaxIdleTimeout":      30,
@@ -646,6 +646,7 @@ func TestServerEditExposesAllTransportFields(t *testing.T) {
 	for _, want := range []string{
 		`bindAddr = "10.100.111.2"`,
 		"bindPort = 7019",
+		`proxyBindAddr = "0.0.0.0"`,
 		"quicBindPort = 7019",
 		"transport.tcpMux = true",
 		"transport.tcpMuxKeepaliveInterval = 15",

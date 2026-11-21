@@ -121,7 +121,7 @@ func Classify(raw []byte, kind Kind) (Style, string, error) {
 // take the merge path and preserve it. It never locks the structured editor.
 var (
 	serverTopKeys = map[string]bool{
-		"bindAddr": true, "bindPort": true, "quicBindPort": true, "kcpBindPort": true,
+		"bindAddr": true, "bindPort": true, "proxyBindAddr": true, "quicBindPort": true, "kcpBindPort": true,
 		"transport": true, "auth": true, "webServer": true,
 	}
 	serverTransportKeys = map[string]bool{

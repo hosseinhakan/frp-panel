@@ -240,6 +240,55 @@ func TestRenderServerGoldenPlain(t *testing.T) {
 	checkGolden(t, "server-plain.toml", RenderServer(serverPlainFixture()))
 }
 
+// A private/GRE bindAddr must not leak onto the forwarded user ports: frps has
+// to keep the control port on the tunnel while the forwarded ports stay public.
+func TestServerProxyBindAddrForPrivateBindAddr(t *testing.T) {
+	c, err := NewServerConfig(ServerOptions{BindAddr: "10.100.113.2", BindPort: 7000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProxyBindAddr != "0.0.0.0" {
+		t.Fatalf("ProxyBindAddr = %q, want 0.0.0.0", c.ProxyBindAddr)
+	}
+	rendered := RenderServer(c)
+	if !strings.Contains(rendered, `proxyBindAddr = "0.0.0.0"`) {
+		t.Errorf("rendered frps config missing proxyBindAddr:\n%s", rendered)
+	}
+	// Round-trip and merge must preserve it on structured edits.
+	cfg, err := ParseServer([]byte(rendered))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProxyBindAddr != "0.0.0.0" {
+		t.Errorf("parsed ProxyBindAddr = %q", cfg.ProxyBindAddr)
+	}
+	cfg.Transport.HeartbeatTimeout = 60
+	merged, err := MergeServer([]byte(rendered), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(merged), "proxyBindAddr") {
+		t.Errorf("merge dropped proxyBindAddr:\n%s", merged)
+	}
+}
+
+// A wildcard bindAddr already accepts the forwarded ports on every interface,
+// so no proxyBindAddr is emitted (frp's own default applies).
+func TestServerProxyBindAddrWildcard(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0", "::"} {
+		c, err := NewServerConfig(ServerOptions{BindAddr: addr, BindPort: 7000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.ProxyBindAddr != "" {
+			t.Errorf("bindAddr %q: ProxyBindAddr = %q, want empty", addr, c.ProxyBindAddr)
+		}
+		if strings.Contains(RenderServer(c), "proxyBindAddr") {
+			t.Errorf("bindAddr %q: unexpected proxyBindAddr line", addr)
+		}
+	}
+}
+
 func TestRenderClientGoldenBoth(t *testing.T) {
 	checkGolden(t, "client-both.toml", RenderClient(clientBothFixture()))
 }

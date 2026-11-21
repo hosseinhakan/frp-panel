@@ -35,7 +35,7 @@ const (
 	wizardForeignPrivate = "10.100.111.1/30" // frpc side (exit)
 	wizardServerAddr     = "10.100.111.2"
 	wizardDefaultPort    = 7025
-	wizardMTU            = 1400
+	wizardMTU            = 1320   // safe across Iran ISP/MPLS/PPPoE paths (1400 black-holes)
 	wizardMSS            = "1220" // safe TCPMSS clamp for GRE (1240 is the other recommended value)
 )
 
@@ -246,7 +246,8 @@ func (s *Server) wizardIran(w http.ResponseWriter, req *wizardGREFRPReq) {
 		"backup":   gres.Backup,
 		"server": map[string]any{
 			"name": name, "file": path, "bindAddr": cfg.BindAddr, "bindPort": port,
-			"protocol": protoName, "token": cfg.Auth.Token, "unit": unit,
+			"proxyBindAddr": cfg.ProxyBindAddr,
+			"protocol":      protoName, "token": cfg.Auth.Token, "unit": unit,
 		},
 		"watchdog":       wd,
 		"verify":         gate.VerifyMode,

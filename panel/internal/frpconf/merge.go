@@ -86,6 +86,11 @@ func MergeServer(raw []byte, c *ServerConfig) ([]byte, error) {
 	}
 	m["bindAddr"] = c.BindAddr
 	m["bindPort"] = c.BindPort
+	if c.ProxyBindAddr != "" {
+		m["proxyBindAddr"] = c.ProxyBindAddr
+	} else {
+		delete(m, "proxyBindAddr")
+	}
 	if c.QUICBindPort > 0 {
 		m["quicBindPort"] = c.QUICBindPort
 	} else {

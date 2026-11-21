@@ -52,10 +52,16 @@ func (q QUIC) IsZero() bool { return q == QUIC{} }
 // else are classified StyleAdvanced/StyleTemplate and edited as raw text
 // (see Classify and docs/ARCHITECTURE.md §4.3).
 type ServerConfig struct {
-	BindAddr     string `toml:"bindAddr"`
-	BindPort     int    `toml:"bindPort"`
-	QUICBindPort int    `toml:"quicBindPort"` // 0 = unset
-	KCPBindPort  int    `toml:"kcpBindPort"`  // 0 = unset
+	BindAddr string `toml:"bindAddr"`
+	BindPort int    `toml:"bindPort"`
+	// ProxyBindAddr is where frps binds the *forwarded user ports*. When frps
+	// listens on a private/GRE address the control port must stay private, but
+	// the forwarded ports still have to be reachable from the public internet —
+	// without this FRP binds them to the GRE IP and they are unreachable.
+	// Empty means "same as bindAddr" (frp's own default).
+	ProxyBindAddr string `toml:"proxyBindAddr"` // "" = unset
+	QUICBindPort  int    `toml:"quicBindPort"`  // 0 = unset
+	KCPBindPort   int    `toml:"kcpBindPort"`   // 0 = unset
 
 	Transport struct {
 		QUIC                    QUIC `toml:"quic"`

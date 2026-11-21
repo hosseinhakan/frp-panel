@@ -17,7 +17,7 @@ func fixtureTunnel() Tunnel {
 		Iface:           "gt11",
 		LocalPrivateIP:  "10.100.111.1/30",
 		RemotePrivateIP: "10.100.111.2/30",
-		MTU:             1400,
+		MTU:             1320,
 		MSSMode:         "clamp",
 	}
 }
@@ -31,7 +31,7 @@ REMOTE_PUBLIC_IP=5.6.7.8
 IFACE=gt11
 LOCAL_PRIVATE_IP=10.100.111.1/30
 REMOTE_PRIVATE_IP=10.100.111.2/30
-MTU=1400
+MTU=1320
 MSS_MODE=clamp
 `
 	if got := RenderEnv(fixtureTunnel()); got != want {
@@ -50,7 +50,7 @@ frp-manager gre create \
   --iface gt11 \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
-  --mtu 1400 \
+  --mtu 1320 \
   --mss clamp
 
 # Equivalent env file (/root/frp/gre/gt11.env):
@@ -59,7 +59,7 @@ REMOTE_PUBLIC_IP=1.2.3.4
 IFACE=gt11
 LOCAL_PRIVATE_IP=10.100.111.2/30
 REMOTE_PRIVATE_IP=10.100.111.1/30
-MTU=1400
+MTU=1320
 MSS_MODE=clamp
 `
 	got := fixtureTunnel().MirrorText("/root/frp/gre")
@@ -174,7 +174,7 @@ func TestMirror(t *testing.T) {
 	if m.LocalPrivateIP != "10.100.111.2/30" || m.RemotePrivateIP != "10.100.111.1/30" {
 		t.Errorf("private swap wrong: %+v", m)
 	}
-	if m.Iface != "gt11" || m.MTU != 1400 || m.MSSMode != "clamp" {
+	if m.Iface != "gt11" || m.MTU != 1320 || m.MSSMode != "clamp" {
 		t.Errorf("mirror lost invariants: %+v", m)
 	}
 }

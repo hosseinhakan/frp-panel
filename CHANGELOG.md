@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.2.6 — production fixes + GRE/FRP anti-disconnect hardening
+
+### Fixed
+
+- **Forwarded ports were unreachable behind a GRE bind.** When frps
+  `bindAddr` is a specific address (the Iran GRE IP), FRP binds every forwarded
+  user port to that same address, so `1.2.3.4:<port>` never accepted a
+  connection. The suite now emits `proxyBindAddr = "0.0.0.0"` whenever
+  `bindAddr` is not `""`, `0.0.0.0` or `::`: the panel wizard, `POST
+  /api/servers`, the `frps` Edit modal (new field, defaulting to `0.0.0.0` for a
+  GRE IP and preserved on structured edits) and `frp-manager` / `frp-setup.sh`.
+- **`add tunnel "gre0" failed: File exists`.** Both `frp-gre up` and the
+  Foreign installer now tear down any other keyless GRE interface already
+  pointing at the same remote public IP before `ip tunnel add`.
+- **Raw speed is now the default.** The Reverse Wizard (Foreign step), the
+  Foreign Setup generator and the Client Create modal start with raw speed ON
+  (`tls.enable=false`, per-proxy encryption/compression off, `tcpMux=false`);
+  it stays toggleable.
+
+### Hardened
+
+- Default GRE MTU lowered `1400 → 1320` (GRE adds 24 bytes and 1400
+  black-holes on some Iran ISP/MPLS/PPPoE paths).
+- Idempotent anti-disconnect rules in `frp-gre` and the Foreign installer:
+  `TCPMSS --set-mss 1220` on `POSTROUTING -o <iface>` (host-originated SYNs
+  bypass `FORWARD`) plus the `-i` direction, `NOTRACK` for protocol 47 on
+  `PREROUTING`/`OUTPUT`, and `rp_filter=0` / `tcp_mtu_probing=1` /
+  `tcp_base_mss=1024`. The POSTROUTING rule is purged on `down`.
+- Faster failure detection without flapping: frpc `poolCount=10`,
+  `heartbeatInterval=15`, `heartbeatTimeout=45`, `dialServerTimeout=10`,
+  `dialServerKeepalive=30`; frps `heartbeatTimeout=45`, `tcpKeepalive=30`;
+  `tcpMux=false` and `loginFailExit=false` kept.
+- `frps@`, `frpc@` and `gre-tunnel@` units use `StartLimitIntervalSec=0`,
+  `Restart=always` and `RestartSec=3s` across `scripts/install.sh`,
+  `frp-setup.sh`, the embedded unit writers and the Foreign installer.
+
+### Verification
+
+- `go test -count=1 ./...`, `go vet ./...`, `node --check …/app.js`,
+  `bash -n scripts/install.sh`, `bash -n frp-setup.sh`,
+  `scripts/check-sync.sh`, and `bash -n` on the generated
+  `FRP_FOREIGN_SETUP` payload.
+- New regression tests: `TestServerProxyBindAddrForPrivateBindAddr` and
+  `TestServerProxyBindAddrWildcard`.
+
 ## v1.2.5 — reuse an existing GRE tunnel for a repeated public pair
 
 ### Fixed

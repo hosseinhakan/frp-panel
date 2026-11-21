@@ -8,6 +8,7 @@
 package gre
 
 import (
+	"crypto/rand"
 	"fmt"
 	"math/big"
 	"net"
@@ -16,12 +17,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"crypto/rand"
 )
 
 // Defaults matching the CLI wizard (frp-setup.sh gre_create_prompt).
 const (
-	DefaultMTU     = 1400
+	// DefaultMTU is deliberately conservative: 1400 black-holes on some
+	// Iran ISP/MPLS/PPPoE paths (GRE adds 24 bytes of overhead), so 1320 is
+	// the safe default across the whole route.
+	DefaultMTU      = 1320
 	DefaultMSSMode  = "clamp"
 	DefaultName     = "gt11"
 	defaultSubnet3o = 111 // 10.100.<n>.0/30 suggestion starts at n=111
@@ -35,14 +38,14 @@ var safeValue = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,64}$`)
 
 // Tunnel is one GRE tunnel definition (one .env file).
 type Tunnel struct {
-	Name           string `json:"name"` // env file stem == systemd instance
-	LocalPublicIP  string `json:"local_public_ip"`
-	RemotePublicIP string `json:"remote_public_ip"`
-	Iface          string `json:"iface"`
-	LocalPrivateIP string `json:"local_private_ip"`  // CIDR, e.g. 10.100.111.1/30
+	Name            string `json:"name"` // env file stem == systemd instance
+	LocalPublicIP   string `json:"local_public_ip"`
+	RemotePublicIP  string `json:"remote_public_ip"`
+	Iface           string `json:"iface"`
+	LocalPrivateIP  string `json:"local_private_ip"`  // CIDR, e.g. 10.100.111.1/30
 	RemotePrivateIP string `json:"remote_private_ip"` // CIDR, e.g. 10.100.111.2/30
-	MTU            int    `json:"mtu"`
-	MSSMode        string `json:"mss_mode"` // clamp|1360|1240|1220|off
+	MTU             int    `json:"mtu"`
+	MSSMode         string `json:"mss_mode"` // clamp|1360|1240|1220|off
 }
 
 // MSSModes lists the accepted TCP MSS clamping modes (frp-gre mss_rules).

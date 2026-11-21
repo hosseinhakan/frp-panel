@@ -24,7 +24,7 @@ func seedProbeState(t *testing.T, e *testEnv) {
 	tunnel := gre.Tunnel{
 		Name: "gt11", LocalPublicIP: "1.2.3.4", RemotePublicIP: "5.6.7.8", Iface: "gt11",
 		LocalPrivateIP: "10.100.111.1/30", RemotePrivateIP: "10.100.111.2/30",
-		MTU: 1400, MSSMode: "clamp",
+		MTU: 1320, MSSMode: "clamp",
 	}
 	if err := gre.Write(e.srv.paths.GREDir, tunnel); err != nil {
 		t.Fatal(err)

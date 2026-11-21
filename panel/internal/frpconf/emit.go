@@ -20,6 +20,9 @@ func RenderServer(c *ServerConfig) string {
 	w("# Managed frps configuration — edit via frp-manager or the panel for best results.")
 	w("bindAddr = %q", c.BindAddr)
 	w("bindPort = %d", c.BindPort)
+	if c.ProxyBindAddr != "" {
+		w("proxyBindAddr = %q", c.ProxyBindAddr)
+	}
 	if c.QUICBindPort > 0 {
 		w("quicBindPort = %d", c.QUICBindPort)
 	}

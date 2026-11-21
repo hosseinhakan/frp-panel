@@ -331,7 +331,7 @@
                       <p class="faint small mt05">
                         Creates <span class="mono" x-text="rev.iface || 'gt11'"></span>
                         (<span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.2/30')"></span> ↔
-                        <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1400,
+                        <span class="mono" x-text="(rev.subnet || '10.100.111.0/30').replace('.0/30', '.1/30')"></span>, MTU 1320,
                         NOTRACK proto 47, TCPMSS clamp 1240/1220), uses your token (or auto-generates one),
                         and binds frps to the GRE IP by default so the control port stays off the public internet.
                         Busy interfaces, subnets and ports are re-allocated automatically.
@@ -720,6 +720,11 @@
                       <input class="input mono" type="number" min="1" max="65535" x-model="edit.bindPort">
                     </div>
                     <div class="field">
+                      <label>Proxy bind address</label>
+                      <input class="input mono" x-model="edit.proxyBindAddr" list="server-bind-choices" placeholder="same as bind address">
+                      <span class="hint">Where forwarded user ports listen. Keep <span class="mono">0.0.0.0</span> when bindAddr is a GRE/private IP, otherwise the forwarded ports are unreachable from the internet.</span>
+                    </div>
+                    <div class="field">
                       <label>Protocol</label>
                       <select class="select" x-model="edit.protocol">
                         <option value="quic">quic</option>
@@ -745,7 +750,7 @@
                     <div class="field">
                       <label>heartbeatTimeout</label>
                       <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.heartbeatTimeout">
-                      <span class="hint">seconds · mikeesierrah profile: 90</span>
+                      <span class="hint">seconds · stability default 45</span>
                     </div>
                   </div>
                   <div class="row mt05">
@@ -757,7 +762,7 @@
                       <div class="field">
                         <label>tcpKeepalive</label>
                         <input class="input mono" type="number" min="1" max="3600" x-model.number="edit.tcpKeepalive">
-                        <span class="hint">seconds · mikeesierrah profile: 120</span>
+                        <span class="hint">seconds · stability default 30</span>
                       </div>
                       <div class="field">
                         <label>maxPoolCount</label>
@@ -1230,7 +1235,7 @@
                         <input class="input mono" type="number" min="1" max="100000000" x-model.number="edit.quicMaxIncomingStreams">
                       </div>
                     </div>
-                    <p class="faint small mt05">mikeesierrah profile: dial 10s / keepalive 120s / pool 20 / heartbeat 30s / timeout 90s / QUIC 10·30·100000.</p>
+                    <p class="faint small mt05">stability profile: dial 10s / keepalive 30s / pool 10 / heartbeat 15s / timeout 45s / QUIC 10·30·100000.</p>
                   </details>
                   <div class="row mt05">
                     <label class="check"><input type="checkbox" x-model="edit.loginFailExit"> loginFailExit</label>

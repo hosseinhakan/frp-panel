@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Protocol selects the frps auxiliary transport (in addition to plain TCP).
@@ -29,15 +30,31 @@ const (
 
 // ServerOptions collects the wizard inputs for a new frps instance.
 type ServerOptions struct {
-	BindAddr    string // default "::" (dual-stack, like the original script)
-	BindPort    int    // default 7000
-	Protocol    Protocol
-	TCPMux      bool
-	Token       string // generated when empty
-	WebAddr     string // default "127.0.0.1" when WebPort > 0
-	WebPort     int    // 0 disables the webServer block
-	WebUser     string // default "admin"
-	WebPassword string // generated when empty and WebPort > 0
+	BindAddr      string // default "::" (dual-stack, like the original script)
+	BindPort      int    // default 7000
+	ProxyBindAddr string // "" = derive from BindAddr (0.0.0.0 for a private/GRE IP)
+	Protocol      Protocol
+	TCPMux        bool
+	Token         string // generated when empty
+	WebAddr       string // default "127.0.0.1" when WebPort > 0
+	WebPort       int    // 0 disables the webServer block
+	WebUser       string // default "admin"
+	WebPassword   string // generated when empty and WebPort > 0
+}
+
+// DefaultProxyBindAddr returns the proxyBindAddr frps needs for a given
+// listen address. A wildcard (or empty) bindAddr already accepts the forwarded
+// ports on every interface, so nothing is emitted. A specific address — most
+// importantly the GRE tunnel IP used by the Iran entry node — makes frps bind
+// the forwarded user ports to *that* address only, which is unreachable from
+// the public internet. For those we return "0.0.0.0" so the control port stays
+// private inside GRE while the forwarded ports listen publicly.
+func DefaultProxyBindAddr(bindAddr string) string {
+	switch strings.TrimSpace(bindAddr) {
+	case "", "0.0.0.0", "::":
+		return ""
+	}
+	return "0.0.0.0"
 }
 
 // NewServerConfig builds a ServerConfig with the suite's secure defaults.
@@ -48,11 +65,14 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	if o.BindAddr == "" {
 		o.BindAddr = "::"
 	}
+	if o.ProxyBindAddr == "" {
+		o.ProxyBindAddr = DefaultProxyBindAddr(o.BindAddr)
+	}
 	if o.Protocol == "" {
 		o.Protocol = ProtoQUIC
 	}
 
-	c := &ServerConfig{BindAddr: o.BindAddr, BindPort: o.BindPort}
+	c := &ServerConfig{BindAddr: o.BindAddr, BindPort: o.BindPort, ProxyBindAddr: o.ProxyBindAddr}
 	switch o.Protocol {
 	case ProtoQUIC:
 		c.QUICBindPort = o.BindPort
@@ -64,11 +84,13 @@ func NewServerConfig(o ServerOptions) (*ServerConfig, error) {
 	}
 
 	c.Transport.QUIC = DefaultQUIC()
-	c.Transport.HeartbeatTimeout = 90
+	// Stability-tuned for lossy long-haul links: a 45s heartbeat timeout with
+	// frpc's 15s interval detects dead peers fast without flapping.
+	c.Transport.HeartbeatTimeout = 45
 	c.Transport.MaxPoolCount = 65535
 	c.Transport.TCPMux = o.TCPMux
 	c.Transport.TCPMuxKeepaliveInterval = 10
-	c.Transport.TCPKeepalive = 120
+	c.Transport.TCPKeepalive = 30
 
 	c.Auth.Method = "token"
 	if o.Token == "" {
@@ -158,10 +180,13 @@ func NewClientConfig(o ClientOptions) (*ClientConfig, error) {
 	t.TCPMux = o.TCPMux
 	t.TCPMuxKeepaliveInterval = 10
 	t.DialServerTimeout = 10
-	t.DialServerKeepalive = 120
-	t.PoolCount = 20
-	t.HeartbeatInterval = 30
-	t.HeartbeatTimeout = 90
+	// Stability-tuned for high-loss Iran↔Foreign GRE links: a smaller pool
+	// avoids bursty SYN floods on reconnect, and the 15s/45s heartbeat pair
+	// fails over quickly without flapping.
+	t.DialServerKeepalive = 30
+	t.PoolCount = 10
+	t.HeartbeatInterval = 15
+	t.HeartbeatTimeout = 45
 	t.TLS.Enable = o.UseTLS
 	t.QUIC = DefaultQUIC()
 

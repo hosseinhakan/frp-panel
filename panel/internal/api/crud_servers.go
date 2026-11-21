@@ -23,21 +23,23 @@ var instanceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 // ---- DTOs ------------------------------------------------------------------
 
 type serverCreateReq struct {
-	Name        string `json:"name"`
-	BindPort    int    `json:"bindPort"`
-	BindAddr    string `json:"bindAddr"`
-	Protocol    string `json:"protocol"` // quic | kcp | none (default quic)
-	TCPMux      *bool  `json:"tcpMux"`
-	Token       string `json:"token"`
-	WebEnabled  *bool  `json:"webEnabled"` // default true (metrics dashboard)
-	WebPort     int    `json:"webPort"`
-	WebUser     string `json:"webUser"`
-	WebPassword string `json:"webPassword"`
+	Name          string `json:"name"`
+	BindPort      int    `json:"bindPort"`
+	BindAddr      string `json:"bindAddr"`
+	ProxyBindAddr string `json:"proxyBindAddr"` // "" = derive (0.0.0.0 for a GRE/private bindAddr)
+	Protocol      string `json:"protocol"`      // quic | kcp | none (default quic)
+	TCPMux        *bool  `json:"tcpMux"`
+	Token         string `json:"token"`
+	WebEnabled    *bool  `json:"webEnabled"` // default true (metrics dashboard)
+	WebPort       int    `json:"webPort"`
+	WebUser       string `json:"webUser"`
+	WebPassword   string `json:"webPassword"`
 }
 
 type serverUpdateReq struct {
 	BindPort                *int    `json:"bindPort"`
 	BindAddr                *string `json:"bindAddr"`
+	ProxyBindAddr           *string `json:"proxyBindAddr"`
 	Protocol                *string `json:"protocol"`
 	TCPMux                  *bool   `json:"tcpMux"`
 	TCPMuxKeepaliveInterval *int    `json:"tcpMuxKeepaliveInterval"`
@@ -62,6 +64,7 @@ type serverSummary struct {
 	File                    string    `json:"file"`
 	BindAddr                string    `json:"bindAddr"`
 	BindPort                int       `json:"bindPort"`
+	ProxyBindAddr           string    `json:"proxyBindAddr"`
 	Protocol                string    `json:"protocol"`
 	WebPort                 int       `json:"webPort"`
 	WebUser                 string    `json:"webUser,omitempty"`
@@ -114,6 +117,7 @@ func (s *Server) serverSummary(name string) serverSummary {
 	} else {
 		sum.BindAddr = cfg.BindAddr
 		sum.BindPort = cfg.BindPort
+		sum.ProxyBindAddr = cfg.ProxyBindAddr
 		sum.Protocol = serverProtocol(cfg)
 		sum.WebPort = cfg.WebServer.Port
 		sum.WebUser = cfg.WebServer.User
@@ -206,6 +210,10 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid bindAddr %q (want 0.0.0.0, :: or a tunnel IP)", req.BindAddr)
 		return
 	}
+	if req.ProxyBindAddr != "" && net.ParseIP(req.ProxyBindAddr) == nil {
+		writeErr(w, http.StatusBadRequest, "invalid proxyBindAddr %q (want 0.0.0.0, :: or an address)", req.ProxyBindAddr)
+		return
+	}
 	proto, ok := protocolFromWire(req.Protocol)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "invalid protocol %q (want quic|kcp|none)", req.Protocol)
@@ -233,12 +241,13 @@ func (s *Server) handleServersCreate(w http.ResponseWriter, r *http.Request) {
 		webEnabled = *req.WebEnabled
 	}
 	opts := frpconf.ServerOptions{
-		BindAddr:    req.BindAddr,
-		BindPort:    req.BindPort,
-		Protocol:    proto,
-		Token:       req.Token,
-		WebUser:     req.WebUser,
-		WebPassword: req.WebPassword,
+		BindAddr:      req.BindAddr,
+		BindPort:      req.BindPort,
+		ProxyBindAddr: req.ProxyBindAddr,
+		Protocol:      proto,
+		Token:         req.Token,
+		WebUser:       req.WebUser,
+		WebPassword:   req.WebPassword,
 	}
 	if req.TCPMux != nil {
 		opts.TCPMux = *req.TCPMux
@@ -403,6 +412,23 @@ func (s *Server) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.BindAddr = *req.BindAddr
+	}
+	if req.ProxyBindAddr != nil {
+		if v := strings.TrimSpace(*req.ProxyBindAddr); v != "" {
+			if net.ParseIP(v) == nil {
+				writeErr(w, http.StatusBadRequest, "invalid proxyBindAddr %q", v)
+				return
+			}
+			cfg.ProxyBindAddr = v
+		} else {
+			cfg.ProxyBindAddr = ""
+		}
+	}
+	// A GRE/private bindAddr with no explicit proxyBindAddr would make frps
+	// bind the forwarded user ports to the tunnel IP — unreachable from the
+	// public internet. Default them to 0.0.0.0 instead.
+	if cfg.ProxyBindAddr == "" {
+		cfg.ProxyBindAddr = frpconf.DefaultProxyBindAddr(cfg.BindAddr)
 	}
 	if req.Protocol != nil {
 		proto, ok := protocolFromWire(*req.Protocol)

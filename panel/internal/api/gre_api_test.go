@@ -51,7 +51,7 @@ func TestGRECreateWritesCLIByteIdenticalEnv(t *testing.T) {
 	want := gre.RenderEnv(gre.Tunnel{
 		Name: "gt11", LocalPublicIP: "1.2.3.4", RemotePublicIP: "5.6.7.8", Iface: "gt11",
 		LocalPrivateIP: "10.100.111.1/30", RemotePrivateIP: "10.100.111.2/30",
-		MTU: 1400, MSSMode: "clamp",
+		MTU: 1320, MSSMode: "clamp",
 	})
 	if string(raw) != want {
 		t.Errorf("env drift vs CLI:\n--- want ---\n%s\n--- got ---\n%s", want, raw)
@@ -201,7 +201,7 @@ frp-manager gre create \
   --iface gt11 \
   --local-private 10.100.111.2/30 \
   --remote-private 10.100.111.1/30 \
-  --mtu 1400 \
+  --mtu 1320 \
   --mss clamp
 
 # Equivalent env file (`
@@ -211,7 +211,7 @@ REMOTE_PUBLIC_IP=1.2.3.4
 IFACE=gt11
 LOCAL_PRIVATE_IP=10.100.111.2/30
 REMOTE_PRIVATE_IP=10.100.111.1/30
-MTU=1400
+MTU=1320
 MSS_MODE=clamp
 `
 	if envText != want {

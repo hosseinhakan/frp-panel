@@ -64,14 +64,14 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		"transport.poolCount = 15",
 		"transport.heartbeatInterval = 15",
 		"transport.heartbeatTimeout = 45",
-		// Anti-disconnect hardening: local SYN MSS, protocol-47 NOTRACK,
-		// rp_filter/MTU probing, and a duplicate-GRE guard before ip tunnel add.
+		// Anti-disconnect hardening: local SYN MSS, rp_filter/MTU probing, and
+		// a duplicate-GRE guard before ip tunnel add. Protocol-47 NOTRACK is
+		// left to `frp-gre up`, which installs it idempotently.
 		`iptables -t mangle -A POSTROUTING -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220`,
-		`iptables -t raw -A PREROUTING -p 47 -j NOTRACK`,
-		`iptables -t raw -A OUTPUT -p 47 -j NOTRACK`,
 		`net.ipv4.conf."$IFACE".rp_filter=0`,
 		"net.ipv4.tcp_mtu_probing=1",
 		"ip -d tunnel show", // stale GRE with the same remote is removed first
+		`$2~/^gre(\/|$)/`,   // `ip -d tunnel show` prints gre/ip on modern kernels
 		"purge_remote_conflicts",
 		"/usr/local/bin/frpc",
 		"net.core.default_qdisc = fq", // BBR + fq tuning
@@ -80,6 +80,13 @@ func TestForeignScriptFromLinkedGRE(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("foreign script missing %q:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, `iptables -t raw -A PREROUTING -p 47 -j NOTRACK`) ||
+		strings.Contains(script, `iptables -t raw -A OUTPUT -p 47 -j NOTRACK`) {
+		t.Errorf("foreign script duplicates the raw NOTRACK rule that frp-gre up already installs:\n%s", script)
+	}
+	if strings.Contains(script, "$2==\"gre\"") {
+		t.Errorf("foreign script still matches only the bare gre link type:\n%s", script)
 	}
 	if strings.Contains(script, `name = "udp-`) {
 		t.Errorf("proto=tcp emitted UDP proxies:\n%s", script)
@@ -117,5 +124,26 @@ func TestForeignScriptUnlinkedRequiresPublicIP(t *testing.T) {
 	if !strings.Contains(script, "SERVER_ADDR='10.100.111.2'") ||
 		!strings.Contains(script, "FOREIGN_PRIVATE_IP='10.100.111.1/30'") {
 		t.Errorf("default /30 not used:\n%s", script)
+	}
+}
+
+func TestForeignScriptGREAwkMatchesGREIP(t *testing.T) {
+	// Modern kernels print the link type as `gre/ip`; the stale-tunnel
+	// cleanup pipeline must still extract the interface name (it deletes any
+	// other tunnel pointed at the same remote before `ip tunnel add`).
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	const input = "gt11: gre/ip remote 206.1.100.7 local 212.108.97.131 ttl 255\n"
+	awk := `awk -v r="206.1.100.7" '$2 ~ /^gre(\/|$)/ { n = $1; sub(/:$/, "", n); for (i = 3; i < NF; i++) if ($i == "remote" && $(i + 1) == r) { print n; break } }'`
+	cmd := exec.Command(bash, "-c", awk)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("awk: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "gt11" {
+		t.Errorf("gre/ip row matched %q, want gt11:\n%s", got, out)
 	}
 }

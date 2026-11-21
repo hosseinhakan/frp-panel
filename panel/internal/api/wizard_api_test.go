@@ -728,16 +728,21 @@ func TestWizardRolesNeverPassNowFlag(t *testing.T) {
 func TestParseLiveGRETunnels(t *testing.T) {
 	out := "gt11: gre remote 206.1.100.7 local 5.6.7.8 dev eth0 ttl inherit\n" +
 		"gt12: gre remote 203.0.113.9 local 198.51.100.4 dev eth1\n" +
+		"gt13: gre/ip remote 206.1.100.7 local 212.108.97.131 ttl 255\n" +
 		"eth0: <BROADCAST,MULTICAST,UP> mtu 1500\n"
 	got := parseLiveGRETunnels(out)
-	if len(got) != 2 {
-		t.Fatalf("parsed %d tunnels, want 2: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("parsed %d tunnels, want 3: %+v", len(got), got)
 	}
 	if got[0].Iface != "gt11" || got[0].LocalPublicIP != "5.6.7.8" || got[0].RemotePublicIP != "206.1.100.7" {
 		t.Errorf("gt11 = %+v", got[0])
 	}
 	if got[1].Iface != "gt12" || got[1].LocalPublicIP != "198.51.100.4" || got[1].RemotePublicIP != "203.0.113.9" {
 		t.Errorf("gt12 = %+v", got[1])
+	}
+	// `ip -d tunnel show` prints the link kind as `gre/ip` on modern kernels.
+	if got[2].Iface != "gt13" || got[2].LocalPublicIP != "212.108.97.131" || got[2].RemotePublicIP != "206.1.100.7" {
+		t.Errorf("gt13 (gre/ip) = %+v", got[2])
 	}
 }
 

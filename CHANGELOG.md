@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.8 — GRE type matching, capability + NOTRACK fixes
+
+### Fixed
+
+- **`frpc@.service` / `frps@.service` ambient capabilities.** Removed the
+  nonexistent `CAP_SYS_BIND_SERVICE` (and the duplicated `CAP_SYS_PTRACE`), so
+  `AmbientCapabilities` now matches `CapabilityBoundingSet`
+  (`CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_PTRACE
+  CAP_DAC_READ_SEARCH`). systemd no longer rejects the unit and the daemons keep
+  the capabilities they actually need.
+- **`gre/ip` tunnels are recognised.** `ip -d tunnel show` prints the link type
+  as `gre/ip` on modern kernels; `frp-gre purge_remote_conflicts`, the
+  `FRP_FOREIGN_SETUP` stale-tunnel cleanup and `frp-manager gre list` now match
+  both `gre` and `gre/ip` instead of skipping every real tunnel.
+- **No duplicate raw `NOTRACK` rule.** `FRP_FOREIGN_SETUP` no longer appends its
+  own protocol-47 `NOTRACK` rules after `frp-gre up` has already installed the
+  idempotent `CT --notrack` (with a `NOTRACK` fallback), keeping
+  `iptables -t raw -S` clean.
+
 ## v1.2.7 — editable GRE tunnels, deeper tuning + 3-way link diagnostics
 
 ### Added

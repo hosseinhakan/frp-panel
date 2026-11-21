@@ -185,7 +185,7 @@ purge_remote_conflicts() {
         echo "frp-gre: removing stale GRE $name (same remote $REMOTE_PUBLIC_IP)"
         ip tunnel del "$name" 2>/dev/null || ip link del "$name" 2>/dev/null || true
     done < <(ip -d tunnel show 2>/dev/null | awk -v r="$REMOTE_PUBLIC_IP" '
-        $2 == "gre" {
+        $2 ~ /^gre(\/|$)/ {
             name = $1; sub(/:$/, "", name)
             for (i = 3; i < NF; i++) if ($i == "remote" && $(i + 1) == r) { print name; break }
         }')

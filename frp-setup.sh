@@ -330,7 +330,7 @@ purge_remote_conflicts() {
         echo "frp-gre: removing stale GRE $name (same remote $REMOTE_PUBLIC_IP)"
         ip tunnel del "$name" 2>/dev/null || ip link del "$name" 2>/dev/null || true
     done < <(ip -d tunnel show 2>/dev/null | awk -v r="$REMOTE_PUBLIC_IP" '
-        $2 == "gre" {
+        $2 ~ /^gre(\/|$)/ {
             name = $1; sub(/:$/, "", name)
             for (i = 3; i < NF; i++) if ($i == "remote" && $(i + 1) == r) { print name; break }
         }')
@@ -1236,7 +1236,7 @@ Wants=network-online.target
 
 [Service]
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_BIND_SERVICE CAP_SYS_PTRACE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=/usr/local/bin/frps -c /root/frp/server/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -1261,7 +1261,7 @@ Wants=network-online.target
 
 [Service]
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_NET_BIND_SERVICE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_SYS_BIND_SERVICE CAP_SYS_PTRACE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 ExecStart=/usr/local/bin/frpc -c /root/frp/client/%i.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -2338,7 +2338,7 @@ reverse_live_tunnels() { # -> "iface local_pub remote_pub" per live GRE tunnel
     local line iface local_ip remote_ip i
     local -a toks
     while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*([^:[:space:]]+):[[:space:]]+gre([[:space:]]|$) ]] || continue
+        [[ "$line" =~ ^[[:space:]]*([^:[:space:]]+):[[:space:]]+gre([[:space:]]|/) ]] || continue
         iface="${BASH_REMATCH[1]}"
         local_ip=""; remote_ip=""
         read -r -a toks <<< "${line#*:}"
